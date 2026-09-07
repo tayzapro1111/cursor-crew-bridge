@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "cursor-crew-bridge"
 version = "0.4.0"
-description = "ACP bridge so Kiro Crew talks to Cursor Agent CLI — Grok 4.6 Extra High, no Kiro subscription"
+description = "Swap Kiro Crew’s ACP child between Cursor Agent and official kiro-cli"
 requires-python = ">=3.11"
 readme = "README.md"
 license = { file = "LICENSE" }

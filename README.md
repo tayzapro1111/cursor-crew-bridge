@@ -1,43 +1,41 @@
 # cursor-crew-bridge
 
-**Use [Kiro Crew](https://github.com/kirodotdev/KiroCrew) with [Cursor Agent](https://cursor.com) models. No Kiro subscription. No Kiro tokens. Same dashboard.**
+Kiro Crew on the left. Cursor’s bill on the right.
 
-`cursor-crew-bridge` is an **ACP (Agent Client Protocol) shim**. Kiro Crew always talks ACP to a `kiro-cli` child. This repo *is* that child: Crew stays the familiar desktop app, the model and the bill come from your Cursor plan (Grok 4.6 Extra High by default).
+Two launchers, one checkout. Pick a backend and Autopilot stays the same cards you already know.
 
 [Русский](README.ru.md) · [简体中文](docs/i18n/README.zh-CN.md) · [日本語](docs/i18n/README.ja.md) · [Español](docs/i18n/README.es.md) · [Deutsch](docs/i18n/README.de.md) · [Português](docs/i18n/README.pt-BR.md) · [Français](docs/i18n/README.fr.md) · [한국어](docs/i18n/README.ko.md)
 
-[How it works](docs/HOW-IT-WORKS.md) · [Install](docs/INSTALL.md) · [Config](docs/CONFIGURATION.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Changelog](CHANGELOG.md)
+[Install](docs/INSTALL.md) · [Autopilot](docs/AUTOPILOT.md) · [Internals](docs/HOW-IT-WORKS.md) · [Config](docs/CONFIGURATION.md) · [Fix-it](docs/TROUBLESHOOTING.md) · [Releases](https://github.com/Chumbayoumba/cursor-crew-bridge/releases)
 
-![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB)
-![License MIT](https://img.shields.io/badge/license-MIT-green)
-![ACP](https://img.shields.io/badge/protocol-ACP-111)
-![Platforms](https://img.shields.io/badge/os-Windows%20%7C%20macOS%20%7C%20Linux-informational)
-![CI](https://img.shields.io/github/actions/workflow/status/Chumbayoumba/cursor-crew-bridge/ci.yml?label=CI)
+![CI](https://img.shields.io/github/actions/workflow/status/Chumbayoumba/cursor-crew-bridge/ci.yml?branch=main&label=tests)
+![Release](https://img.shields.io/github/v/release/Chumbayoumba/cursor-crew-bridge?display_name=tag)
+![Python](https://img.shields.io/badge/python-3.11%2B-3776AB)
+![License](https://img.shields.io/badge/license-MIT-green)
 
-> Not affiliated with Kiro / AWS or Anysphere / Cursor. You need a Cursor account (IDE login on this machine) and the Kiro Crew app. You do **not** need a Kiro CLI subscription.
+## Two backends
 
-## Why this exists
+| Launcher | Who answers | Who you pay | Autopilot |
+|---|---|---|---|
+| `start-cursor-gateway` | Cursor Agent (Grok Extra High) | Cursor | Crew cards + this package’s plan/stage steers |
+| `start-kiro-default` | Official `kiro-cli` | Kiro | Native Kiro (`prompt-orchestrator.md`) |
 
-| You have | What you do |
-|---|---|
-| Kiro Crew + Cursor login | Run this bridge. Chat in Crew. Tokens go to Cursor. |
-| Kiro Crew + Kiro subscription | `start-kiro-default` any time. The bridge steps aside. |
-| Neither | Install Crew + sign into Cursor once. That is the whole account setup. |
+Flip any time. History lives in Crew’s `conversation_log`, not in a Kiro session file.
 
-Kiro Crew is an excellent control plane (slots, Autopilot, MCP, dashboard). Official `kiro-cli` bills Kiro. This package keeps Crew and swaps only the ACP backend to **Cursor Agent CLI**.
+## Install
 
-## 60-second install
+**Windows** — Kiro Crew app, sign into Cursor once, then:
 
-### Windows
+```bat
+git clone https://github.com/Chumbayoumba/cursor-crew-bridge.git
+cd cursor-crew-bridge
+setup.bat
+start-cursor-gateway.bat
+```
 
-1. Install [Kiro Crew](https://github.com/kirodotdev/KiroCrew).
-2. Open **Cursor**, sign in, then you can close it. The token stays in the local IDE database.
-3. Clone this repository.
-4. Double-click **`setup.bat`** (or `setup.ps1` if Cursor Agent CLI is missing).
-5. Double-click **`start-cursor-gateway.bat`**.
-6. Talk in Kiro Crew. The live model is Cursor Grok 4.6 Extra High.
+If `doctor` cannot see Cursor Agent CLI, run `setup.ps1`.
 
-### macOS
+**macOS / Linux**
 
 ```bash
 git clone https://github.com/Chumbayoumba/cursor-crew-bridge.git
@@ -47,85 +45,32 @@ chmod +x setup.sh start-cursor-gateway.sh start-kiro-default.sh
 ./start-cursor-gateway.sh
 ```
 
-Install Kiro Crew (`.app`). Sign into Cursor once. If `doctor` cannot find the app, set `KIROCREW_EXE` to:
+Linux: `export KIROCREW_EXE=/path/to/KiroCrew`. Cursor CLI: `curl https://cursor.com/install -fsSL | bash`.
 
-`/Applications/KiroCrew.app/Contents/MacOS/KiroCrew`
+Not affiliated with AWS or Anysphere. You need the Crew desktop app. A Kiro CLI subscription is optional (only the official-Kiro launcher uses it).
 
-### Linux
+## Daily commands
 
-```bash
-git clone https://github.com/Chumbayoumba/cursor-crew-bridge.git
-cd cursor-crew-bridge
-chmod +x setup.sh start-cursor-gateway.sh start-kiro-default.sh
-./setup.sh
-export KIROCREW_EXE=/path/to/KiroCrew
-./start-cursor-gateway.sh
-```
-
-Cursor Agent CLI: `curl https://cursor.com/install -fsSL | bash`
-
-## What you get
-
-```text
-Kiro Crew  --ACP-->  kiro-cli shim (this repo)  --ACP-->  Cursor Agent
-                         ^
-                         KIROCREW_KIRO_BIN in ~/.kiro/crew/.env
-```
-
-- Native Crew pills: `Editing file.ts` instead of `Edit ""`
-- **Cancel** (`Отменить`) stops the Cursor turn — ACP `session/cancel` is a notification, the session stays alive
-- Autopilot text plans (`📋 Plan for:` + `[OPTION: Go | Go All | Cancel]`)
-- Context meter (`usage_update` 256k) so autocompact is not blind
-- Cursor todos appear in Crew’s task sidebar
-- Unpin to official Kiro in one command
-
-## Commands
-
-| Do this | Windows | macOS / Linux |
+| | Windows | macOS / Linux |
 |---|---|---|
-| First install | `setup.bat` | `./setup.sh` |
-| Daily start (Cursor models) | `start-cursor-gateway.bat` | `./start-cursor-gateway.sh` |
-| Back to official Kiro | `start-kiro-default.bat` | `./start-kiro-default.sh` |
-| What is broken? | `.venv\Scripts\cursor-crew.exe doctor` | `.venv/bin/cursor-crew doctor` |
+| Cursor models | `start-cursor-gateway.bat` | `./start-cursor-gateway.sh` |
+| Official Kiro | `start-kiro-default.bat` | `./start-kiro-default.sh` |
+| Health | `.venv\Scripts\cursor-crew.exe doctor` | `.venv/bin/cursor-crew doctor` |
 
 ```text
-cursor-crew setup      # venv + .env
-cursor-crew doctor     # checks, no secrets printed
-cursor-crew gateway    # point Crew at Cursor and launch
-cursor-crew default    # point Crew at official kiro-cli
-cursor-crew status
+cursor-crew setup | doctor | gateway | default | status
 ```
 
-## Requirements
-
-- Windows 10/11, macOS, or Linux
-- Python 3.11+
-- [Kiro Crew](https://github.com/kirodotdev/KiroCrew) desktop app
-- Cursor IDE logged in once on this machine
-- Cursor Agent CLI (`setup.ps1` / `setup.sh` can install it)
-
-## What this is not
-
-- Not a Kiro Integrations API key
-- Not a scrape of the Cursor desktop chat
-- Not xAI’s `~/.grok/bin/agent.exe` (the bridge refuses that binary)
-- Not a replacement for Kiro Crew itself
-- Not Cursor IDE source — Cursor Agent ACP is closed; this shim translates the live wire
-
-## Docs
-
-- [How the ACP bridge works](docs/HOW-IT-WORKS.md)
-- [Install and launch](docs/INSTALL.md)
-- [Environment and models](docs/CONFIGURATION.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md) — including why Cancel used to keep talking
-
-## Development
+## Package
 
 ```bash
-python -m venv .venv
-# Windows: .venv\Scripts\python.exe -m pip install -e ".[dev]"
-.venv/bin/python -m pip install -e ".[dev]"
-.venv/bin/python -m pytest
+pip install https://github.com/Chumbayoumba/cursor-crew-bridge/releases/latest/download/cursor_crew_bridge-0.4.0-py3-none-any.whl
 ```
 
-MIT. See [LICENSE](LICENSE).
+Or `pip install -e ".[dev]"` from a clone. Wheels ship on [GitHub Releases](https://github.com/Chumbayoumba/cursor-crew-bridge/releases).
+
+## What Crew already owns
+
+Chat history, Autopilot cards, MCP, memory, Knowledge. This repo only replaces the child behind `KIROCREW_KIRO_BIN`.
+
+MIT — [LICENSE](LICENSE).

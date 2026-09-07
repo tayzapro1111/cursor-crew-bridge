@@ -2,6 +2,7 @@
 
 ## 0.4.0
 
+- Docs split: landing pages per language, [Autopilot two backends](docs/AUTOPILOT.md), GitHub Release + wheel on tag `v0.4.0`.
 - **Cancel:** Crew `session/cancel` is an ACP notification. The shim no longer sends it as a request or clears `sessionId`. After cancel, in-flight tool/text frames are dropped; if Cursor never acks, a 6s watchdog synthesizes `stopReason: cancelled`. That was why «Отменить» painted `[Stopped]` while the model kept talking.
 - **Windows paths:** `rawInput.path` is normalized to `/` so Crew’s `split('/')` chip shows the basename.
 - **Todos:** `cursor/update_todos` becomes a kiro `todo_list` `_meta` + `rawOutput` snapshot for the Crew sidebar. `cursor/create_plan` is still dropped.

@@ -1,25 +1,22 @@
 # cursor-crew-bridge
 
-Use o [Kiro Crew](https://github.com/kirodotdev/KiroCrew) com modelos do [Cursor Agent](https://cursor.com). Sem assinatura Kiro. A fatura vai para o Cursor.
-
-É um *shim* **ACP**: o Crew acha que fala com `kiro-cli`; o backend é `cursor-agent acp`.
+O app Kiro Crew continua o mesmo. `start-cursor-gateway` manda a fatura para o Cursor. `start-kiro-default` devolve o `kiro-cli` oficial.
 
 [English](../../README.md) · [Русский](../../README.ru.md)
 
-## Instalação
+| Atalho | Motor | Conta |
+|---|---|---|
+| `start-cursor-gateway` | Cursor Grok Extra High | Cursor |
+| `start-kiro-default` | `kiro-cli` oficial | assinatura Kiro |
 
-**Windows:** instale o Kiro Crew → entre no Cursor → clone → `setup.bat` → `start-cursor-gateway.bat`
-
-**macOS / Linux:**
+Os cards do Autopilot são do Crew. No caminho Cursor este pacote manda o contrato de plano/etapa. No Kiro vale `prompt-orchestrator.md`.
 
 ```bash
 git clone https://github.com/Chumbayoumba/cursor-crew-bridge.git
 cd cursor-crew-bridge
-chmod +x setup.sh start-cursor-gateway.sh
+chmod +x setup.sh start-cursor-gateway.sh start-kiro-default.sh
 ./setup.sh
 ./start-cursor-gateway.sh
 ```
 
-No Linux defina `KIROCREW_EXE`. CLI do Cursor: `curl https://cursor.com/install -fsSL | bash`
-
-`cursor-crew doctor` não imprime segredos. Cancel para o turno.
+Windows: `setup.bat`. [Instalação](../INSTALL.md)

@@ -1,25 +1,22 @@
 # cursor-crew-bridge
 
-[Kiro Crew](https://github.com/kirodotdev/KiroCrew)에서 [Cursor Agent](https://cursor.com) 모델을 씁니다. Kiro 구독 없이 Cursor 요금만 나갑니다.
-
-**ACP** 심입니다. Crew는 `kiro-cli`와 대화한다고 생각하고, 실제 백엔드는 `cursor-agent acp`입니다.
+Kiro Crew 화면은 그대로입니다. Cursor로 결제하려면 `start-cursor-gateway`, 공식 Kiro로 돌아가려면 `start-kiro-default`.
 
 [English](../../README.md) · [Русский](../../README.ru.md)
 
-## 설치
+| 실행 | 엔진 | 결제 |
+|---|---|---|
+| `start-cursor-gateway` | Cursor Grok Extra High | Cursor |
+| `start-kiro-default` | 공식 `kiro-cli` | Kiro 구독 |
 
-**Windows:** Kiro Crew 설치 → Cursor 로그인 → 클론 → `setup.bat` → `start-cursor-gateway.bat`
-
-**macOS / Linux:**
+Autopilot 카드는 Crew 것입니다. Cursor 경로는 이 저장소가 plan/stage를 보강하고, Kiro 경로는 `prompt-orchestrator.md`를 씁니다.
 
 ```bash
 git clone https://github.com/Chumbayoumba/cursor-crew-bridge.git
 cd cursor-crew-bridge
-chmod +x setup.sh start-cursor-gateway.sh
+chmod +x setup.sh start-cursor-gateway.sh start-kiro-default.sh
 ./setup.sh
 ./start-cursor-gateway.sh
 ```
 
-Linux에서는 `KIROCREW_EXE`를 지정하세요. Cursor CLI: `curl https://cursor.com/install -fsSL | bash`
-
-`cursor-crew doctor`는 비밀을 출력하지 않습니다. Cancel은 턴을 멈춥니다.
+Windows는 `setup.bat`. [설치](../INSTALL.md)

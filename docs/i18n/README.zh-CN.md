@@ -1,25 +1,24 @@
 # cursor-crew-bridge
 
-用 [Kiro Crew](https://github.com/kirodotdev/KiroCrew) 跑 [Cursor Agent](https://cursor.com) 模型。不需要 Kiro 订阅，账单走 Cursor。
-
-这是 **ACP** 垫片：Crew 以为在跟 `kiro-cli` 说话，实际后端是 `cursor-agent acp`。
+Kiro Crew 桌面端不变。想走 Cursor 账单就用 `start-cursor-gateway`；想走官方 Kiro 就用 `start-kiro-default`。
 
 [English](../../README.md) · [Русский](../../README.ru.md)
 
-## 安装
+## 两条路
 
-**Windows:** 安装 Kiro Crew → 登录 Cursor → 克隆仓库 → `setup.bat` → `start-cursor-gateway.bat`
+| 脚本 | 模型谁出 | 账单 |
+|---|---|---|
+| `start-cursor-gateway` | Cursor Grok Extra High | Cursor |
+| `start-kiro-default` | 官方 `kiro-cli` | Kiro 订阅 |
 
-**macOS / Linux:**
+Autopilot 卡片是 Crew 的。Cursor 路径由本仓库补 plan/stage；Kiro 路径用官方 `prompt-orchestrator.md`。
 
 ```bash
 git clone https://github.com/Chumbayoumba/cursor-crew-bridge.git
 cd cursor-crew-bridge
-chmod +x setup.sh start-cursor-gateway.sh
+chmod +x setup.sh start-cursor-gateway.sh start-kiro-default.sh
 ./setup.sh
 ./start-cursor-gateway.sh
 ```
 
-Linux 请设置 `KIROCREW_EXE`。Cursor CLI：`curl https://cursor.com/install -fsSL | bash`
-
-`cursor-crew doctor` 不会打印密钥。取消按钮会真正停止当前回合。
+Windows 用 `setup.bat`。Linux 请设置 `KIROCREW_EXE`。安装说明：[docs/INSTALL.md](../INSTALL.md)。

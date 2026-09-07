@@ -1,25 +1,22 @@
 # cursor-crew-bridge
 
-[Kiro Crew](https://github.com/kirodotdev/KiroCrew) から [Cursor Agent](https://cursor.com) のモデルを使います。Kiro のサブスクは不要です。請求は Cursor 側です。
-
-これは **ACP** シムです。Crew は `kiro-cli` だと思い、実体は `cursor-agent acp` です。
+Kiro Crew の画面はそのまま。Cursor の請求にしたいときは `start-cursor-gateway`。公式 Kiro に戻すときは `start-kiro-default`。
 
 [English](../../README.md) · [Русский](../../README.ru.md)
 
-## インストール
+| 起動 | 中身 | 支払い |
+|---|---|---|
+| `start-cursor-gateway` | Cursor Grok Extra High | Cursor |
+| `start-kiro-default` | 公式 `kiro-cli` | Kiro |
 
-**Windows:** Kiro Crew を入れる → Cursor にログイン → クローン → `setup.bat` → `start-cursor-gateway.bat`
-
-**macOS / Linux:**
+Autopilot のカードは Crew 側です。Cursor 経路ではこのリポジトリが plan/stage を補い、Kiro 経路では `prompt-orchestrator.md` が動きます。
 
 ```bash
 git clone https://github.com/Chumbayoumba/cursor-crew-bridge.git
 cd cursor-crew-bridge
-chmod +x setup.sh start-cursor-gateway.sh
+chmod +x setup.sh start-cursor-gateway.sh start-kiro-default.sh
 ./setup.sh
 ./start-cursor-gateway.sh
 ```
 
-Linux では `KIROCREW_EXE` を設定。Cursor CLI: `curl https://cursor.com/install -fsSL | bash`
-
-`cursor-crew doctor` は秘密を出しません。Cancel はターンを止めます。
+Windows は `setup.bat`。[インストール](../INSTALL.md)

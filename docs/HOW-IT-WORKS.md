@@ -1,6 +1,8 @@
-# How the bridge works
+# Internals
 
-Kiro Crew does not call Cursor’s HTTP API. It speaks **Agent Client Protocol** (JSON-RPC over stdin/stdout) to whatever binary is in `KIROCREW_KIRO_BIN`.
+Launchers and Autopilot routes: [AUTOPILOT.md](AUTOPILOT.md). This page is the wire.
+
+Crew never calls Cursor’s HTTP API. It speaks **Agent Client Protocol** (JSON-RPC over stdin/stdout) to whatever binary is in `KIROCREW_KIRO_BIN`.
 
 Official install: that binary is `%LOCALAPPDATA%\Kiro-Cli\kiro-cli.exe` (Kiro credits).
 

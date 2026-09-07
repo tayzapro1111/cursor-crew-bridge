@@ -1,6 +1,6 @@
-# Troubleshooting
+# Fix-it
 
-Run this first. It never prints secrets.
+`cursor-crew doctor` first. It never prints secrets. Autopilot routes: [AUTOPILOT.md](AUTOPILOT.md).
 
 ```powershell
 .\.venv\Scripts\python.exe -m cursor_crew_bridge.cli doctor

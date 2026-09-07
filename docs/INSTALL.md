@@ -1,6 +1,6 @@
 # Install
 
-You do not replace `kiro-cli.exe` under Program Files. Crew’s official override is `KIROCREW_KIRO_BIN`. Windows, macOS, and Linux all use the same Python package.
+You do not replace `kiro-cli.exe` under Program Files. Crew’s official override is `KIROCREW_KIRO_BIN`. After setup you pick a backend: [Autopilot](AUTOPILOT.md).
 
 ## Prerequisites
 
@@ -17,6 +17,8 @@ cd cursor-crew-bridge
 setup.bat
 start-cursor-gateway.bat
 ```
+
+Then pick a backend ([Autopilot](AUTOPILOT.md)): `start-cursor-gateway.bat` or `start-kiro-default.bat`.
 
 `setup.bat` is silent about Cursor CLI install. If `doctor` says `cursor_agent` is missing, run `setup.ps1` in PowerShell or:
 
