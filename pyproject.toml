@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cursor-crew-bridge"
+version = "0.4.0"
+description = "ACP bridge so Kiro Crew talks to Cursor Agent CLI — Grok 4.6 Extra High, no Kiro subscription"
+requires-python = ">=3.11"
+readme = "README.md"
+license = { file = "LICENSE" }
+keywords = [
+    "kiro",
+    "kiro-crew",
+    "kiro-cli",
+    "cursor",
+    "cursor-agent",
+    "acp",
+    "agent-client-protocol",
+    "grok",
+    "bridge",
+    "windows",
+    "macos",
+    "linux",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/Chumbayoumba/cursor-crew-bridge"
+Repository = "https://github.com/Chumbayoumba/cursor-crew-bridge"
+Issues = "https://github.com/Chumbayoumba/cursor-crew-bridge/issues"
+Changelog = "https://github.com/Chumbayoumba/cursor-crew-bridge/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+kiro-cli = "cursor_crew_bridge.launcher:main"
+cursor-crew-bridge = "cursor_crew_bridge.launcher:main"
+cursor-crew = "cursor_crew_bridge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

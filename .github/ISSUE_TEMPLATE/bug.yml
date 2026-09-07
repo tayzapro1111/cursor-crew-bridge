@@ -1,0 +1,34 @@
+name: Bug report
+description: Something does not work with Kiro Crew + Cursor Agent
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Run `cursor-crew doctor` first. Never paste tokens or `.env`.
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: Windows 11 / macOS 15 / Ubuntu 24.04
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: bridge 0.4.0, Kiro Crew 0.5.x, Cursor Agent CLI …
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: doctor output
+      description: Paste `cursor-crew doctor` (redact paths that contain secrets).
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+    validations:
+      required: true
