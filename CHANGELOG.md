@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.8.1
+
+- **CI:** unit tests no longer require gitignored `KiroCrew-0.5.0/` or the operator’s `~/.kiro`. GitHub Actions was red on 0.8.0 because `test_cursor_ask_payload_passes_crew_validator` asserted a hardcoded `D:\Razrabotka\...` path, and prompt-steering tests loaded `prompt.md` from the developer machine.
+- `cursor-crew gateway` now writes `config.json` / agent JSON when those files are missing instead of silently skipping the patch.
+
 ## 0.8.0
 
 - **Local slash commands:** Crew sends `/help` as `session/prompt` and `/usage` `/tools` `/context` `/clear` as `_kiro.dev/commands/execute`. The shim answers both locally (`result.message` for execute, so Crew's `format_command_result` paints the card). Bare `/help` no longer burns a Grok turn searching the repo.

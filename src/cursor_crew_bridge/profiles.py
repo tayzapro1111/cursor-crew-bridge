@@ -32,12 +32,14 @@ CURSOR_CREW_KEYS = {
 
 
 def _patch_json(path: Path, mutator: Any) -> None:
-    if not path.is_file():
-        return
-    data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
-        return
+    if path.is_file():
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return
+    else:
+        data = {}
     mutator(data)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 

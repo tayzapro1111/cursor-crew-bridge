@@ -6,7 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
-BRIDGE_VERSION = "0.8.0"
+BRIDGE_VERSION = "0.8.1"
 KIRO_AGENT_NAME = "kiro-cli"
 KIRO_AGENT_VERSION = "2.15.0"
 KIRO_VERSION_BANNER = f"{KIRO_AGENT_NAME} {KIRO_AGENT_VERSION}-cursor-crew-bridge"

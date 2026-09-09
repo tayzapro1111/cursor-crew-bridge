@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cursor-crew-bridge"
-version = "0.8.0"
+version = "0.8.1"
 description = "Swap Kiro Crew’s ACP child between Cursor Agent and official kiro-cli"
 requires-python = ">=3.11"
 readme = "README.md"

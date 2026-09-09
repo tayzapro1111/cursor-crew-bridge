@@ -624,6 +624,16 @@ def test_gateway_profile_enables_eager_spawn_and_core_stub(tmp_path, monkeypatch
     assert data["orchestrator"]["stage_timeout_seconds"] == 3600
 
 
+def test_gateway_profile_creates_missing_config(tmp_path, monkeypatch) -> None:
+    from cursor_crew_bridge import profiles
+
+    monkeypatch.setattr(profiles, "data_home", lambda: tmp_path)
+    profiles._patch_crew_config(model="cursor-grok-4.6-xhigh", gateway=True)
+    data = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert data["agent"]["model"] == "cursor-grok-4.6-xhigh"
+    assert data["session"]["eager_spawn"] is True
+
+
 def test_discover_project_dir_from_nested_file(tmp_path, monkeypatch) -> None:
     monkeypatch.delenv("CURSOR_CREW_HOME", raising=False)
     (tmp_path / "pyproject.toml").write_text(

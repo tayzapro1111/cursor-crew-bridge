@@ -1,5 +1,9 @@
 import json
 import re
+import sys
+from pathlib import Path
+
+import pytest
 
 from cursor_crew_bridge.native_parity import (
     ADVERTISE_LOAD_SESSION,
@@ -65,6 +69,25 @@ from cursor_crew_bridge.native_parity import (
     available_commands_update_message,
     command_options_result,
 )
+
+
+def _vendored_crew_src() -> Path:
+    from cursor_crew_bridge.config import PROJECT_DIR
+
+    return PROJECT_DIR / "KiroCrew-0.5.0" / "src"
+
+
+@pytest.fixture
+def prompt_tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    kiro = tmp_path / ".kiro"
+    kiro.mkdir()
+    (kiro / "prompt.md").write_text("fixture prompt.md body\nspawn_run\n", encoding="utf-8")
+    (kiro / "prompt-orchestrator.md").write_text(
+        f"fixture orchestrator body\n{PLAN_HEADER}\nspawn_run\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("cursor_crew_bridge.agent_mcp.load_agent_spec", lambda agent: {})
+    return tmp_path
 
 
 def test_estimate_tokens_is_chars_over_four() -> None:
@@ -145,28 +168,29 @@ def test_stage_and_orchestrator_detection() -> None:
     assert not looks_like_orchestrator("just a bugfix")
 
 
-def test_steering_plan_then_stage() -> None:
+def test_steering_plan_then_stage(prompt_tree: Path) -> None:
     already: set[str] = set()
+    cwd = str(prompt_tree)
     plan_params = {"prompt": [{"type": "text", "text": "This is Autopilot. Make a plan."}]}
-    first = steering_texts(plan_params, agent="kirocrew", crew_mode="", already=already)
+    first = steering_texts(plan_params, agent="kirocrew", crew_mode="", already=already, cwd=cwd)
     blob = "\n".join(first)
     assert ORCHESTRATOR_MARK in blob
     assert "cursor/create_plan" in blob
     assert "host" in already
     stage_params = {"prompt": [{"type": "text", "text": "Execute Stage 1 of 3 now."}]}
-    second = steering_texts(stage_params, agent="kirocrew", crew_mode="orchestrator", already=already)
+    second = steering_texts(stage_params, agent="kirocrew", crew_mode="orchestrator", already=already, cwd=cwd)
     assert second == []
-    third = steering_texts(stage_params, agent="kirocrew", crew_mode="orchestrator", already=already)
+    third = steering_texts(stage_params, agent="kirocrew", crew_mode="orchestrator", already=already, cwd=cwd)
     assert third == []
 
 
-def test_midchat_latch_keeps_planning_steer() -> None:
+def test_midchat_latch_keeps_planning_steer(prompt_tree: Path) -> None:
     assert remember_orchestrator("Execute Stage 1 of 3 now.", "kirocrew") == "orchestrator"
     assert remember_orchestrator("plain bugfix", "kirocrew") == "kirocrew"
     assert remember_orchestrator("plain bugfix", "orchestrator") == "orchestrator"
     already = {"host"}
     later = {"prompt": [{"type": "text", "text": "now fix the remaining callers"}]}
-    cwd = str(__import__("pathlib").Path(".").resolve())
+    cwd = str(prompt_tree)
     extras = steering_texts(
         later, agent="kirocrew", crew_mode="orchestrator", already=already, cwd=cwd
     )
@@ -528,14 +552,11 @@ def test_cursor_ask_payload_matches_crew_card() -> None:
     assert cursor_ask_crew_payload({"questions": [{"prompt": "No options"}]}) is None
 
 
+@pytest.mark.skipif(not _vendored_crew_src().is_dir(), reason="KiroCrew-0.5.0 sources are gitignored")
 def test_cursor_ask_payload_passes_crew_validator() -> None:
-    import sys
-    from pathlib import Path
-
     from cursor_crew_bridge.native_parity import cursor_ask_crew_payload
 
-    crew_src = Path(r"D:\Razrabotka\cursor-crew-bridge\KiroCrew-0.5.0\src")
-    assert crew_src.is_dir()
+    crew_src = _vendored_crew_src()
     sys.path.insert(0, str(crew_src))
     from kiro_crew.acp._dispatch import select_tool_title
     from kiro_crew.validation import validate_ask_user_question
@@ -590,7 +611,7 @@ def test_cursor_task_and_image_helpers() -> None:
     assert b64_frames[0]["params"]["update"]["content"]["type"] == "image"
 
 
-def test_host_identity_and_native_orchestrator_file() -> None:
+def test_host_identity_and_native_orchestrator_file(prompt_tree: Path) -> None:
     already: set[str] = set()
     params = {"prompt": [{"type": "text", "text": "This is Autopilot. Make a plan."}]}
     extras = steering_texts(
@@ -598,7 +619,7 @@ def test_host_identity_and_native_orchestrator_file() -> None:
         agent="kirocrew",
         crew_mode="",
         already=already,
-        cwd=str(__import__("pathlib").Path(".").resolve()),
+        cwd=str(prompt_tree),
         first_turn=True,
     )
     blob = "\n".join(extras)
@@ -625,14 +646,14 @@ def test_cursor_load_session_follows_child_caps() -> None:
     assert passed["fs"]["readTextFile"] is False
 
 
-def test_plain_first_turn_loads_prompt_md() -> None:
+def test_plain_first_turn_loads_prompt_md(prompt_tree: Path) -> None:
     already: set[str] = set()
     extras = steering_texts(
         {"prompt": [{"type": "text", "text": "fix the remaining callers"}]},
         agent="kirocrew",
         crew_mode="kirocrew",
         already=already,
-        cwd=str(__import__("pathlib").Path(".").resolve()),
+        cwd=str(prompt_tree),
         first_turn=True,
     )
     blob = "\n".join(extras)
