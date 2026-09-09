@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.8.2
+
+- **CI:** two remaining handler tests still loaded `prompt.md` from the developer machine (meter % rounded to 0.0; `spawn_run` missing). They now inject fixture prompts.
+
 ## 0.8.1
 
 - **CI:** unit tests no longer require gitignored `KiroCrew-0.5.0/` or the operator’s `~/.kiro`. GitHub Actions was red on 0.8.0 because `test_cursor_ask_payload_passes_crew_validator` asserted a hardcoded `D:\Razrabotka\...` path, and prompt-steering tests loaded `prompt.md` from the developer machine.

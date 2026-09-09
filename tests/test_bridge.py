@@ -710,12 +710,19 @@ def test_merge_mcp_prefers_incoming_stub() -> None:
     assert by_name["grafana"]["command"] == "g"
 
 
-def test_live_handlers_load_usage_and_stage_steer() -> None:
+def test_live_handlers_load_usage_and_stage_steer(tmp_path, monkeypatch) -> None:
     """Stage 5: prove 0.3.1 handlers without spawning Cursor or a Crew chat."""
     import asyncio
 
     from cursor_crew_bridge.acp_bridge import AcpBridge
     from cursor_crew_bridge.config import BRIDGE_VERSION, KIRO_AGENT_NAME, KIRO_AGENT_VERSION
+
+    orchestrator = "spawn_run\n" + ("steer line\n" * 4000)
+    monkeypatch.setattr(
+        "cursor_crew_bridge.native_parity.load_prompt_orchestrator",
+        lambda cwd="": orchestrator,
+    )
+    monkeypatch.setattr("cursor_crew_bridge.agent_mcp.load_agent_spec", lambda agent: {})
 
     bridge = AcpBridge("kirocrew")
     crew: list[dict] = []
@@ -2008,6 +2015,14 @@ def test_stage6_isolated_child_compact_usage_steer_and_plan(tmp_path, monkeypatc
     )
     monkeypatch.setenv("CURSOR_CREW_SESSION_LOG", str(log))
     before = log.read_text(encoding="utf-8")
+    kiro = tmp_path / ".kiro"
+    kiro.mkdir()
+    (kiro / "prompt.md").write_text("fixture prompt.md\nspawn_run\n", encoding="utf-8")
+    (kiro / "prompt-orchestrator.md").write_text(
+        "fixture orchestrator\nspawn_run\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("cursor_crew_bridge.agent_mcp.load_agent_spec", lambda agent: {})
 
     bridge = AcpBridge("kirocrew")
     crew: list[dict] = []
