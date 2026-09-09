@@ -24,6 +24,15 @@ Native kiro-cli streams `usage_update` / `contextUsagePercentage`. Cursor Agent 
 - The **current** dashboard slot keeps the old ACP child until Crew recycles it. Open a new chat, or wait for idle recycle — do not restart the whole gateway unless you want that.
 - After the next `session/prompt` on a 0.3.1 child, `bridge.log` should show `usage used=… window=256000`.
 
+## Context window jumps to ~8% and the chat “forgets”
+
+That was Crew’s **recycle replay**: after a failed `/compact` Crew kills the child and injects only the last ~80k characters (`build_session_replay`). 80k/4 ≈ 20k tokens on a 256k window = **~8%**.
+
+Bridge **0.5.0** compact is rotate+seed: new Cursor session, full-log summary (~120k chars / ~12%), `{type:completed}` so Crew does **not** recycle. If the child still dies, the first prompt **replaces** that 80k tail with the same whole-slot thread (head included). `bridge.log` should show `recycle replay replaced Crew tail` or `compact completed — Cursor rotated`.
+
+- Old ACP child still on `{type:failed}` and no rewrite → next compact still recycles to 8%. New chat / idle recycle picks up 0.5.0.
+- `{type:failed}` after 0.5.0 means rotate `session/new` itself died. The first prompt after recycle still gets the compressed thread, not the raw tail. If `/compact` fails at ~20s / ~90s / ~180s with `timed out` and a `late cursor session/new` log on the same second, an old shim awaited compact on the Crew-handler task and never read Cursor stdout. New chats pick up the detached-pump fix.
+
 ## Optimize Prompt does nothing
 
 The wand POSTs `/api/optimizer/optimize` to a dedicated `_optimizer` slot (`kirocrew-lite`).

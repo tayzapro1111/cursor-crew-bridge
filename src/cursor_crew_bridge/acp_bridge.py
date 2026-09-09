@@ -9,7 +9,7 @@ import time
 import traceback
 from typing import Any
 
-from cursor_crew_bridge.agent_mcp import mcp_servers_for_acp, merge_mcp_servers
+from cursor_crew_bridge.agent_mcp import mcp_initialized_notifications, resolved_mcp_servers
 from cursor_crew_bridge.config import (
     BRIDGE_VERSION,
     CONTEXT_WINDOW_TOKENS,
@@ -22,19 +22,55 @@ from cursor_crew_bridge.config import (
     log_paths,
     resolve_cursor_model,
     skip_mcp,
+    KIRO_AGENT_NAME,
+    KIRO_AGENT_VERSION,
 )
 from cursor_crew_bridge.cursor_auth import child_env
 from cursor_crew_bridge.cursor_cli import acp_argv, redacted_argv
 from cursor_crew_bridge.native_parity import (
     ADVERTISE_LOAD_SESSION,
+    CREATE_PLAN_OUTCOME,
+    crew_client_capabilities,
+    cursor_load_session_supported,
+    cursor_prompt_capabilities,
     UsageTracker,
+    build_compact_summary,
+    clamp_used,
+    compact_prompt_hint,
+    compaction_completed_notification,
+    compaction_failed_notification,
+    compaction_status_ack,
+    conversation_log_path,
+    current_mode_update_message,
+    CREW_REPLAY_CLOSE,
+    CREW_REPLAY_OPEN,
+    cursor_ask_crew_messages,
+    cursor_ask_result,
     cursor_prompt_used_tokens,
+    cursor_task_crew_messages,
     cursor_todos_crew_messages,
     drop_update_after_cancel,
+    dump_acp_frame,
     enrich_cursor_tool_update,
+    stamp_kiro_tool_meta,
+    commands_available_notification,
+    available_commands_update_message,
+    command_options_result,
+    execute_command_name,
+    generated_image_crew_messages,
+    is_compact_command,
+    is_compact_prompt,
+    last_prompt_block,
+    local_slash_crew_messages,
+    local_slash_reply,
+    slash_command_name,
+    load_conversation_rows,
     metadata_percentage_message,
     prepend_prompt_blocks,
+    REPLAY_THREAD_PREFACE,
+    rewrite_prompt_history,
     prompt_cancelled_result,
+    prompt_end_turn_result,
     prompt_text,
     remember_orchestrator,
     session_cancel_notification,
@@ -51,11 +87,15 @@ CURSOR_PLAN = "cursor/create_plan"
 CURSOR_TODOS = "cursor/update_todos"
 CURSOR_TASK = "cursor/task"
 CURSOR_IMAGE = "cursor/generate_image"
-DROP_UPDATES = {
-    "available_commands_update",
-    "current_mode_update",
-    "session_info_update",
-}
+# Compact rotate: quiet-during-session/new cancelled MCP permissions and Cursor
+# hung until ~90s / ~180s. Waiter is a safety net; seed prompt is what we quiet.
+COMPACT_SESSION_NEW_TIMEOUT_S = 180.0
+COMPACT_SESSION_NEW_GRACE_S = 15.0
+# Cursor plumbing kinds Crew already knows (KNOWN_SESSION_UPDATES). Do not
+# drop them — the mode/commands bar never updated while these were discarded.
+# currentModeId is rewritten to the Crew-facing latch (kirocrew / …).
+DROP_UPDATES: set[str] = set()
+_CURSOR_NATIVE_MODES = frozenset({"agent", "plan", "ask"})
 
 
 def _update_kind(msg: dict[str, Any]) -> str:
@@ -64,6 +104,15 @@ def _update_kind(msg: dict[str, Any]) -> str:
     if isinstance(update, dict):
         return str(update.get("sessionUpdate") or "")
     return ""
+
+
+def _crew_rpc_awaits_cursor(msg: dict[str, Any]) -> bool:
+    """True when the Crew handler waits on Cursor and must not block ``run()``'s stdout pump."""
+
+    if msg.get("method") != "session/prompt":
+        return False
+    params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+    return is_compact_prompt(prompt_text(params))
 
 
 def _permission_allow(options: list[Any]) -> dict[str, Any]:
@@ -78,6 +127,7 @@ def _permission_allow(options: list[Any]) -> dict[str, Any]:
         oid = str(options[0].get("optionId") or options[0].get("id") or "allow-once")
         return {"outcome": {"outcome": "selected", "optionId": oid}}
     return {"outcome": {"outcome": "selected", "optionId": "allow-once"}}
+
 
 MODE_MAP = {
     "kirocrew": "agent",
@@ -107,6 +157,13 @@ def _log(message: str) -> None:
                 handle.write(line)
         except OSError:
             continue
+
+
+def _dump(direction: str, payload: dict[str, Any]) -> None:
+    try:
+        dump_acp_frame(direction, payload)
+    except Exception:
+        return
 
 
 # Flow-control only. Lines themselves are assembled in `_LineBuf` with no cap.
@@ -273,10 +330,47 @@ def _parse_line(raw: bytes) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _rewrite_model(model_id: Any) -> str:
+def _rewrite_model(model_id: Any, *, lite: bool = False) -> str:
     if not isinstance(model_id, str):
-        return DEFAULT_MODEL
-    return resolve_cursor_model(model_id, lite=False)
+        return resolve_cursor_model(LITE_MODEL if lite else DEFAULT_MODEL, lite=lite)
+    return resolve_cursor_model(model_id, lite=lite)
+
+
+def _current_model_for_agent(agent: str) -> str:
+    if is_lite_agent(agent):
+        return resolve_cursor_model(LITE_MODEL, lite=True)
+    return resolve_cursor_model(DEFAULT_MODEL, lite=False)
+
+
+def _available_modes(agent: str) -> list[dict[str, str]]:
+    mode_id = agent or DEFAULT_AGENT_NAME
+    advertised = [
+        {"id": mode_id, "name": mode_id, "description": "Cursor Grok via crew bridge"},
+        {"id": "agent", "name": "agent", "description": "Cursor agent mode"},
+        {"id": "plan", "name": "plan", "description": "Cursor plan mode"},
+        {"id": "ask", "name": "ask", "description": "Cursor ask mode"},
+    ]
+    seen = {item["id"] for item in advertised}
+    for extra in ("kirocrew", "kirocrew-conductor", "kirocrew-lite", "orchestrator", "autopilot"):
+        if extra not in seen:
+            advertised.append({"id": extra, "name": extra, "description": extra})
+    return advertised
+
+
+def _mode_is_known(mode_id: str, agent: str) -> bool:
+    if not mode_id:
+        return True
+    if mode_id in MODE_MAP:
+        return True
+    return any(item["id"] == mode_id for item in _available_modes(agent))
+
+
+def _crew_facing_mode(cursor_mode: str, crew_mode: str, agent: str) -> str:
+    if crew_mode:
+        return crew_mode
+    if cursor_mode in _CURSOR_NATIVE_MODES:
+        return agent or DEFAULT_AGENT_NAME
+    return cursor_mode or agent or DEFAULT_AGENT_NAME
 
 
 def _prompt_chars(params: dict[str, Any]) -> int:
@@ -332,38 +426,25 @@ def _model_entry(model_id: str, name: str) -> dict[str, str | int]:
 
 def _inject_modes(result: dict[str, Any], agent: str) -> dict[str, Any]:
     mode_id = agent or DEFAULT_AGENT_NAME
-    advertised = [
-        {"id": mode_id, "name": mode_id, "description": "Cursor Grok via crew bridge"},
-        {"id": "agent", "name": "agent", "description": "Cursor agent mode"},
-        {"id": "plan", "name": "plan", "description": "Cursor plan mode"},
-        {"id": "ask", "name": "ask", "description": "Cursor ask mode"},
-    ]
-    seen = {item["id"] for item in advertised}
-    for extra in ("kirocrew", "kirocrew-conductor", "kirocrew-lite"):
-        if extra not in seen:
-            advertised.append({"id": extra, "name": extra, "description": extra})
-    result["modes"] = {"currentModeId": mode_id, "availableModes": advertised}
+    result["modes"] = {"currentModeId": mode_id, "availableModes": _available_modes(agent)}
     # Crew entitlement checks `modelId`, not `id`. Cursor's native list uses
     # tagged ids like `claude-opus-5[thinking=true…]`; if we forward that list,
     # Crew withholds `auto`→opus and then races a second set_model. Pin only Grok.
+    # currentModelId is the child that is actually running (lite → high-fast).
     result["models"] = {
-        "currentModelId": DEFAULT_MODEL,
+        "currentModelId": _current_model_for_agent(agent),
         "availableModels": [_model_entry(model_id, name) for model_id, name in advertised_model_aliases()],
     }
     return result
 
 
-def _clamp_token_size(value: Any) -> Any:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return value
-    if value > CONTEXT_WINDOW_TOKENS:
-        return CONTEXT_WINDOW_TOKENS
-    return value
-
-
 def _clamp_usage_update(msg: dict[str, Any]) -> dict[str, Any]:
-    """Cursor may advertise a 1M window. Extra High is 256k — Crew's meter and
-    autocompact (70% of ``size``) must use the real cap, or Grok dies first."""
+    """Pin Crew's meter to Extra High / high-fast 256k.
+
+    Cursor may advertise a 1M window. If that ``size`` reaches Crew, the bar
+    shows ~8% of 1M while Grok is already a third full, and autocompact
+    (70% of ``size``) never fires in time.
+    """
 
     if msg.get("method") != "session/update":
         return msg
@@ -382,24 +463,21 @@ def _clamp_usage_update(msg: dict[str, Any]) -> dict[str, Any]:
         nested = new_update["usage"]
     else:
         nested = None
+    window = CONTEXT_WINDOW_TOKENS if CONTEXT_WINDOW_TOKENS > 0 else 256_000
     changed = False
     for container in (new_update, nested):
         if not isinstance(container, dict):
             continue
-        size = container.get("size")
-        clamped = _clamp_token_size(size)
-        if clamped != size:
-            container["size"] = clamped
-            changed = True
+        if "size" in container or "used" in container:
+            if container.get("size") != window:
+                changed = True
+            container["size"] = window
         used = container.get("used")
-        size_now = container.get("size")
-        if (
-            isinstance(used, (int, float))
-            and not isinstance(used, bool)
-            and (size_now is None or (isinstance(size_now, (int, float)) and not isinstance(size_now, bool) and size_now <= 0))
-        ):
-            container["size"] = CONTEXT_WINDOW_TOKENS
-            changed = True
+        if isinstance(used, (int, float)) and not isinstance(used, bool):
+            pinned = clamp_used(int(used), window)
+            if pinned != used:
+                container["used"] = pinned
+                changed = True
     if not changed:
         return msg
     out = dict(msg)
@@ -418,7 +496,7 @@ def _apply_tool_title_enrichment(msg: dict[str, Any]) -> dict[str, Any]:
     update = params.get("update")
     if not isinstance(update, dict):
         return msg
-    enriched = enrich_cursor_tool_update(update)
+    enriched = stamp_kiro_tool_meta(enrich_cursor_tool_update(update))
     if enriched is update:
         return msg
     out = dict(msg)
@@ -428,20 +506,53 @@ def _apply_tool_title_enrichment(msg: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _normalize_update(msg: dict[str, Any]) -> dict[str, Any]:
+def _rewrite_plumbing_update(
+    msg: dict[str, Any], *, crew_mode: str = "", agent: str = ""
+) -> dict[str, Any]:
+    """Map Cursor agent/plan/ask onto the Crew-facing mode id."""
+
+    if msg.get("method") != "session/update":
+        return msg
+    params = msg.get("params")
+    if not isinstance(params, dict):
+        return msg
+    update = params.get("update") if isinstance(params.get("update"), dict) else None
+    if not isinstance(update, dict):
+        return msg
+    kind = str(update.get("sessionUpdate") or "")
+    if kind not in {"current_mode_update", "session_info_update"}:
+        return msg
+    cursor_mode = str(update.get("currentModeId") or "")
+    facing = _crew_facing_mode(cursor_mode, crew_mode, agent)
+    if not facing or facing == cursor_mode:
+        return msg
+    new_update = dict(update)
+    new_update["currentModeId"] = facing
+    out = dict(msg)
+    new_params = dict(params)
+    new_params["update"] = new_update
+    out["params"] = new_params
+    return out
+
+
+def _normalize_update(
+    msg: dict[str, Any], *, crew_mode: str = "", agent: str = ""
+) -> dict[str, Any]:
     if msg.get("method") != "session/update":
         return msg
     params = msg.get("params")
     if not isinstance(params, dict):
         return msg
     if isinstance(params.get("update"), dict):
-        return _apply_tool_title_enrichment(_clamp_usage_update(msg))
+        clamped = _apply_tool_title_enrichment(_clamp_usage_update(msg))
+        return _rewrite_plumbing_update(clamped, crew_mode=crew_mode, agent=agent)
     if "sessionUpdate" in params:
         session_id = params.get("sessionId")
         update = {k: v for k, v in params.items() if k != "sessionId"}
         wrapped = dict(msg)
         wrapped["params"] = {"sessionId": session_id, "update": update}
-        return _apply_tool_title_enrichment(_clamp_usage_update(wrapped))
+        clamped = _apply_tool_title_enrichment(_clamp_usage_update(wrapped))
+        return _rewrite_plumbing_update(clamped, crew_mode=crew_mode, agent=agent)
     return msg
 
 
@@ -458,6 +569,11 @@ def _rewrite_permission_options(msg: dict[str, Any]) -> dict[str, Any]:
             continue
         item = dict(option)
         opt_id = str(item.get("optionId") or item.get("id") or "")
+        if opt_id:
+            if not item.get("optionId"):
+                item["optionId"] = opt_id
+            if not item.get("id"):
+                item["id"] = opt_id
         kind = str(item.get("kind") or "")
         if opt_id in {"allow-once", "allow_once", "allow"} and not kind:
             item["kind"] = "allow_once"
@@ -465,10 +581,17 @@ def _rewrite_permission_options(msg: dict[str, Any]) -> dict[str, Any]:
             item["kind"] = "allow_always"
         if opt_id in {"reject-once", "reject_once", "reject"} and not kind:
             item["kind"] = "reject_once"
+        if not item.get("name") and item.get("label"):
+            item["name"] = item["label"]
+        if not item.get("label") and item.get("name"):
+            item["label"] = item["name"]
         rewritten.append(item)
     out = dict(msg)
     new_params = dict(params)
     new_params["options"] = rewritten
+    tool = new_params.get("toolCall")
+    if isinstance(tool, dict):
+        new_params["toolCall"] = stamp_kiro_tool_meta(tool)
     out["params"] = new_params
     return out
 
@@ -523,30 +646,14 @@ def _ask_question_text(params: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _ask_question_result(_params: dict[str, Any]) -> dict[str, Any]:
-    # Do not pick the first option. Native Crew shows a card; Cursor ACP cannot
-    # render one here, so skip and surface the question as chat text instead.
-    return {"outcome": {"outcome": "skipped", "reason": "shown in chat; not auto-answered"}}
+def _ask_question_result(_params: dict[str, Any] | None = None) -> dict[str, Any]:
+    return cursor_ask_result()
 
 
 def _extract_image_block(value: Any) -> dict[str, str] | None:
-    if not isinstance(value, dict):
-        return None
-    kind = str(value.get("type") or "").lower()
-    mime = value.get("mimeType") or value.get("mime")
-    data = value.get("data") or value.get("imageData") or value.get("blob")
-    if isinstance(data, str) and data and (kind == "image" or isinstance(mime, str) and mime.startswith("image/")):
-        return {"type": "image", "data": data, "mimeType": str(mime or "image/png")}
-    for item in value.values():
-        found = _extract_image_block(item)
-        if found:
-            return found
-        if isinstance(item, list):
-            for nested in item:
-                found = _extract_image_block(nested)
-                if found:
-                    return found
-    return None
+    from cursor_crew_bridge.native_parity import extract_generated_image
+
+    return extract_generated_image(value)
 
 
 class AcpBridge:
@@ -563,6 +670,14 @@ class AcpBridge:
         self._stdout_lines: _LineBuf | None = None
         self._stderr_lines: _LineBuf | None = None
         self._session_id: str | None = None
+        self._cursor_sid: str | None = None
+        self._cursor_new_params: dict[str, Any] = {"cwd": ".", "mcpServers": []}
+        self._cursor_waiters: dict[Any, asyncio.Future[dict[str, Any]]] = {}
+        self._quiet_cursor = False
+        self._compact_rotate = False
+        self._compacting = False
+        self._retired_cursor_sids: set[str] = set()
+        self._awaiting_replay = False
         self._fatal: str | None = None
         self._crew_mode = ""
         self._steered: set[str] = set()
@@ -571,15 +686,67 @@ class AcpBridge:
         self._turn_cancelled = False
         self._answered_prompt_ids: set[Any] = set()
         self._cancel_watch: asyncio.Task[None] | None = None
+        self._cursor_load_session = bool(ADVERTISE_LOAD_SESSION)
 
     def _next_bridge_id(self) -> int:
         self._bridge_rpc += 1
         return self._bridge_rpc
 
+    def _bind_cursor_session(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Rewrite Crew-facing sessionId to the live Cursor child after rotate."""
+
+        if payload.get("method") == "session/new":
+            return payload
+        params = payload.get("params")
+        if not isinstance(params, dict):
+            return payload
+        cursor_sid = self._cursor_sid
+        crew_sid = self._session_id
+        if not cursor_sid or not crew_sid or cursor_sid == crew_sid:
+            return payload
+        if params.get("sessionId") != crew_sid:
+            return payload
+        out = dict(payload)
+        bound = dict(params)
+        bound["sessionId"] = cursor_sid
+        out["params"] = bound
+        return out
+
+    def _bind_crew_session(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Hide the rotated Cursor sid so Crew keeps the original sessionId."""
+
+        params = payload.get("params")
+        if not isinstance(params, dict):
+            return payload
+        cursor_sid = self._cursor_sid
+        crew_sid = self._session_id
+        if not cursor_sid or not crew_sid or cursor_sid == crew_sid:
+            return payload
+        if params.get("sessionId") != cursor_sid:
+            return payload
+        out = dict(payload)
+        bound = dict(params)
+        bound["sessionId"] = crew_sid
+        out["params"] = bound
+        return out
+
+    async def _cursor_rpc(
+        self, method: str, params: dict[str, Any], *, timeout: float = 30
+    ) -> dict[str, Any]:
+        if not (self.proc and self.proc.stdin):
+            raise RuntimeError("cursor ACP not connected")
+        req_id = self._next_bridge_id()
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[dict[str, Any]] = loop.create_future()
+        self._cursor_waiters[req_id] = waiter
+        await self._send_cursor({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
+        try:
+            return await asyncio.wait_for(waiter, timeout)
+        finally:
+            self._cursor_waiters.pop(req_id, None)
+
     def _spawn_model(self) -> str:
-        if is_lite_agent(self.agent):
-            return resolve_cursor_model(LITE_MODEL, lite=True)
-        return resolve_cursor_model(DEFAULT_MODEL, lite=False)
+        return _current_model_for_agent(self.agent)
 
     def _track_forward(self, req_id: Any, method: str) -> None:
         if req_id is not None:
@@ -603,11 +770,33 @@ class AcpBridge:
         if not sid:
             return
         used, window = self._usage.snapshot()
-        if used <= 0:
-            return
         await self._send_crew(usage_update_message(sid, used, window))
         await self._send_crew(metadata_percentage_message(sid, used, window))
         _log(f"usage used={used} window={window} pct={round(used / window * 100, 1) if window else 0}")
+
+    async def _emit_mode(self, session_id: str | None = None) -> None:
+        sid = (session_id or "").strip() or self._session_id
+        mode = (self._crew_mode or self.agent or "").strip()
+        if not sid or not mode:
+            return
+        await self._send_crew(current_mode_update_message(sid, mode))
+
+    async def _emit_commands(self, session_id: str | None = None) -> None:
+        sid = (session_id or "").strip() or self._session_id
+        if not sid:
+            return
+        await self._send_crew(commands_available_notification(sid))
+        await self._send_crew(available_commands_update_message(sid))
+
+    async def _emit_mcp_initialized(self, session_id: str | None = None) -> None:
+        if skip_mcp() or is_lite_agent(self.agent):
+            return
+        servers = self._cursor_new_params.get("mcpServers") if isinstance(self._cursor_new_params, dict) else []
+        if not isinstance(servers, list) or not servers:
+            return
+        sid = (session_id or "").strip() or self._session_id or ""
+        for frame in mcp_initialized_notifications(sid, servers):
+            await self._send_crew(frame)
 
     async def _fail_open_crew_rpcs(self, reason: str) -> None:
         pending = dict(self._pending_methods)
@@ -681,7 +870,10 @@ class AcpBridge:
                     except OSError:
                         pass
 
-    async def _send_cursor(self, payload: dict[str, Any]) -> None:
+    async def _send_cursor(self, payload: dict[str, Any], *, bind: bool = True) -> None:
+        if bind:
+            payload = self._bind_cursor_session(payload)
+        _dump("cursor_out", payload)
         if not (self.proc and self.proc.stdin):
             _log(f"cursor stdin missing while sending {payload.get('method') or payload.get('id')}")
             return
@@ -689,11 +881,13 @@ class AcpBridge:
             try:
                 self.proc.stdin.write(_dumps(payload))
                 await self.proc.stdin.drain()
-            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
-                _log(f"cursor stdin closed while sending {payload.get('method') or payload.get('id')}: {exc}")
+            except (BrokenPipeError, ConnectionResetError, OSError) as cop_exc:
+                _log(f"cursor stdin closed while sending {payload.get('method') or payload.get('id')}: {cop_exc}")
                 return
 
     async def _send_crew(self, payload: dict[str, Any]) -> None:
+        payload = self._bind_crew_session(payload)
+        _dump("crew_out", payload)
         try:
             for frame in crew_outbound_messages(payload):
                 sys.stdout.buffer.write(_dumps(frame))
@@ -723,6 +917,9 @@ class AcpBridge:
 
     async def _cancel_turn(self, params: dict[str, Any]) -> None:
         sid = params.get("sessionId") if isinstance(params.get("sessionId"), str) else self._session_id
+        if self._compacting or self._compact_rotate:
+            _log(f"session/cancel ignored during compact sid={sid}")
+            return
         self._turn_cancelled = True
         _log(f"session/cancel notification sid={sid} prompt_id={self._prompt_req_id}")
         if sid:
@@ -742,65 +939,305 @@ class AcpBridge:
         self._prompt_req_id = None
         self._turn_cancelled = False
         self._session_id = None
+        self._cursor_sid = None
+        self._awaiting_replay = False
+
+    async def _emit_compaction_failed(self, session_id: str | None) -> None:
+        sid = session_id if isinstance(session_id, str) and session_id.strip() else (self._session_id or "")
+        await self._send_crew(compaction_failed_notification(sid))
+
+    async def _emit_compaction_completed(self, session_id: str | None) -> None:
+        sid = session_id if isinstance(session_id, str) and session_id.strip() else (self._session_id or "")
+        await self._send_crew(compaction_completed_notification(sid))
+
+    async def _reply_local_text(self, req_id: Any, params: dict[str, Any], text: str) -> None:
+        """Answer Crew locally — do not forward the turn to Cursor."""
+
+        sid = params.get("sessionId") if isinstance(params.get("sessionId"), str) else self._session_id
+        if isinstance(sid, str) and sid.strip() and not self._session_id:
+            self._session_id = sid.strip()
+        if sid:
+            for frame in local_slash_crew_messages(sid, text):
+                await self._send_crew(frame)
+            await self._emit_usage(sid)
+        if req_id is not None:
+            self._answered_prompt_ids.add(req_id)
+            self._pending_methods.pop(req_id, None)
+            await self._send_crew(prompt_end_turn_result(req_id))
+
+    def _compact_seed_text(self, hint: str = "") -> str:
+        path = conversation_log_path()
+        rows = load_conversation_rows(path) if path is not None else []
+        return build_compact_summary(rows, hint=hint)
+
+    def _recycle_thread_text(self) -> str:
+        path = conversation_log_path()
+        rows = load_conversation_rows(path) if path is not None else []
+        return build_compact_summary(rows, preface=REPLAY_THREAD_PREFACE)
+
+    def _apply_recycle_replay(self, params: dict[str, Any]) -> dict[str, Any]:
+        """First prompt after session/new: whole-slot thread, not Crew's 80k tail."""
+
+        thread = self._recycle_thread_text()
+        rewritten, replaced = rewrite_prompt_history(params, thread)
+        if replaced:
+            _log(f"recycle replay replaced Crew tail with thread chars={len(thread)}")
+            return rewritten
+        if len(thread) > len(REPLAY_THREAD_PREFACE) + 20:
+            block = f"{CREW_REPLAY_OPEN}\n{thread.rstrip()}\n{CREW_REPLAY_CLOSE}"
+            _log(f"recycle replay prepended thread chars={len(thread)}")
+            return prepend_prompt_blocks(params, [block])
+        return params
+
+    async def _rotate_cursor_and_seed(self, summary: str) -> None:
+        """New Cursor session, same Crew sessionId, seed the whole conversation_log."""
+
+        params = dict(self._cursor_new_params or {"cwd": ".", "mcpServers": []})
+        old = self._cursor_sid
+        n = len(params.get("mcpServers") or [])
+        _log(f"compact rotate session/new mcp={n} (detached from crew pump)")
+        # Awaiting _cursor_rpc from run()'s crew handler blocked the Cursor
+        # stdout pump, so session/new sat unread until the waiter expired
+        # (photofinish). Compact is detached from that pump. Quiet still
+        # auto-cancels MCP permissions — never quiet during session/new.
+        # Crew is also blocked on compaction status, so allow MCP locally.
+        self._compact_rotate = True
+        try:
+            try:
+                created = await self._cursor_rpc(
+                    "session/new", params, timeout=COMPACT_SESSION_NEW_TIMEOUT_S
+                )
+            except TimeoutError as exc:
+                if COMPACT_SESSION_NEW_GRACE_S > 0:
+                    await asyncio.sleep(COMPACT_SESSION_NEW_GRACE_S)
+                late = self._cursor_sid
+                if isinstance(late, str) and late.strip() and late != old:
+                    _log(
+                        f"compact session/new adopted late sid={late} "
+                        f"after {COMPACT_SESSION_NEW_TIMEOUT_S:.0f}s waiter"
+                    )
+                    created = {"result": {"sessionId": late}}
+                else:
+                    n = len(params.get("mcpServers") or [])
+                    raise RuntimeError(
+                        "cursor session/new timed out after "
+                        f"{COMPACT_SESSION_NEW_TIMEOUT_S:.0f}s mcp={n}"
+                    ) from exc
+            if created.get("error"):
+                raise RuntimeError(f"cursor session/new: {created.get('error')}")
+            result = created.get("result") if isinstance(created.get("result"), dict) else {}
+            new_sid = result.get("sessionId")
+            if not isinstance(new_sid, str) or not new_sid.strip():
+                raise RuntimeError("cursor session/new returned no sessionId")
+            self._cursor_sid = new_sid.strip()
+            if old and old != self._cursor_sid:
+                # old often equals Crew's sessionId. Binding would rewrite this
+                # cancel onto the new Cursor sid and interrupt the seed turn.
+                self._retired_cursor_sids.add(old)
+                await self._send_cursor(session_cancel_notification(old), bind=False)
+            # New empty Cursor session is enough to drop the meter. The seed
+            # prompt can outlive Extra High thinking; do not fail compact (and
+            # recycle to the 80k tail) just because COMPACT_OK was slow.
+            self._quiet_cursor = True
+            try:
+                seeded = await self._cursor_rpc(
+                    "session/prompt",
+                    {
+                        "sessionId": self._cursor_sid,
+                        "prompt": [{"type": "text", "text": summary}],
+                    },
+                    timeout=90,
+                )
+                if seeded.get("error"):
+                    _log(f"compact seed prompt error (session already rotated): {seeded.get('error')}")
+            except Exception as exc:
+                _log(f"compact seed prompt unfinished (session already rotated): {exc}")
+            finally:
+                self._quiet_cursor = False
+        finally:
+            self._quiet_cursor = False
+            self._compact_rotate = False
+        self._usage.reset()
+        self._usage.note_prompt_chars(len(summary))
+
+    async def _compact_inplace(self, req_id: Any, params: dict[str, Any]) -> None:
+        """Rotate Cursor + seed the full log. Crew sees ``completed``, JSONL untouched.
+
+        Fallback ``failed`` only when rotate/seed cannot run — then Crew recycles.
+        """
+
+        sid = params.get("sessionId") if isinstance(params.get("sessionId"), str) else self._session_id
+        _log(f"compact in-place start crew_sid={sid} cursor_sid={self._cursor_sid}")
+        if isinstance(sid, str) and sid.strip() and not self._session_id:
+            self._session_id = sid.strip()
+        hint = compact_prompt_hint(prompt_text(params))
+        self._compacting = True
+        try:
+            try:
+                summary = self._compact_seed_text(hint)
+                await self._rotate_cursor_and_seed(summary)
+            except Exception as exc:
+                detail = str(exc).strip() or type(exc).__name__
+                _log(f"compact rotate+seed failed — emit failed for recycle+replay: {detail}")
+                await self._emit_compaction_failed(sid if isinstance(sid, str) else None)
+                # Same Crew dashboard trap as the success path: status after
+                # end_turn purges streamed text. Status first, then a real
+                # assistant row, then end_turn (shared below).
+                sid_out = self._session_id or (sid if isinstance(sid, str) else "")
+                if sid_out:
+                    for frame in local_slash_crew_messages(sid_out, "Compact failed.\n"):
+                        await self._send_crew(frame)
+            else:
+                _log(
+                    "compact completed — Cursor rotated and seeded from conversation_log; "
+                    f"crew_sid={self._session_id} cursor_sid={self._cursor_sid}"
+                )
+                # Crew dashboard: a compaction banner is kind=compaction (skipped
+                # by is_turn_interrupted). Status after end_turn hits the deferred
+                # /compact path which purge_chunks() the streamed reply. Native
+                # kiro-cli may emit status before end_turn; we must too, then a
+                # real assistant chunk so the last conversational row is not
+                # the user `/compact` (Resume).
+                await self._emit_compaction_completed(self._session_id)
+                sid_out = self._session_id or (sid if isinstance(sid, str) else "")
+                if sid_out:
+                    for frame in local_slash_crew_messages(sid_out, "Compacted in place.\n"):
+                        await self._send_crew(frame)
+                if req_id is not None:
+                    self._answered_prompt_ids.add(req_id)
+                    self._pending_methods.pop(req_id, None)
+                    await self._send_crew(prompt_end_turn_result(req_id))
+                await self._emit_usage(self._session_id)
+            if req_id is not None and req_id not in self._answered_prompt_ids:
+                self._answered_prompt_ids.add(req_id)
+                self._pending_methods.pop(req_id, None)
+                await self._send_crew(prompt_end_turn_result(req_id))
+            self._clear_cancel_watch()
+            self._prompt_req_id = None
+            self._turn_cancelled = False
+        finally:
+            self._compacting = False
 
     async def _forward_generated_image(self, msg: dict[str, Any]) -> None:
         params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
-        image = _extract_image_block(params)
-        if not image:
-            return
         sid = params.get("sessionId") if isinstance(params.get("sessionId"), str) else self._session_id
         if not sid:
             return
-        await self._send_crew(
-            {
-                "jsonrpc": "2.0",
-                "method": "session/update",
-                "params": {
-                    "sessionId": sid,
-                    "update": {"sessionUpdate": "agent_message_chunk", "content": image},
-                },
-            }
-        )
+        for frame in generated_image_crew_messages(sid, params):
+            await self._send_crew(frame)
 
     async def _handle_cursor_message(self, msg: dict[str, Any]) -> None:
+        _dump("cursor_in", msg)
         method = msg.get("method")
+        params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+        inbound_sid = params.get("sessionId") if isinstance(params.get("sessionId"), str) else ""
+        if inbound_sid and inbound_sid in self._retired_cursor_sids:
+            _log(f"drop retired cursor {method or 'frame'} sid={inbound_sid}")
+            if msg.get("id") is not None:
+                await self._send_cursor(
+                    {"jsonrpc": "2.0", "id": msg["id"], "result": {}}, bind=False
+                )
+            return
+        if (
+            self._compact_rotate
+            and method == "session/request_permission"
+            and msg.get("id") is not None
+        ):
+            rewritten = _rewrite_permission_options(msg)
+            perm_params = rewritten.get("params") if isinstance(rewritten.get("params"), dict) else {}
+            options = perm_params.get("options") if isinstance(perm_params.get("options"), list) else []
+            _log(f"compact rotate auto-allow request_permission id={msg['id']}")
+            await self._send_cursor(
+                {"jsonrpc": "2.0", "id": msg["id"], "result": _permission_allow(options)}
+            )
+            return
+        if self._compact_rotate:
+            # session/new emits available_commands_update before quiet starts.
+            # Forwarding that during Crew's open /compact prompt paints Resume.
+            if method == "session/update":
+                return
+            if msg.get("id") is not None:
+                if method in {CURSOR_ASK, CURSOR_PLAN}:
+                    result = _ask_question_result() if method == CURSOR_ASK else CREATE_PLAN_OUTCOME
+                    await self._send_cursor({"jsonrpc": "2.0", "id": msg["id"], "result": result})
+                    return
+                if method in {CURSOR_TODOS, CURSOR_TASK, CURSOR_IMAGE}:
+                    await self._send_cursor(
+                        {"jsonrpc": "2.0", "id": msg["id"], "result": {"outcome": {"outcome": "accepted"}}}
+                    )
+                    return
+                await self._send_cursor({"jsonrpc": "2.0", "id": msg["id"], "result": {}})
+            return
+        if self._quiet_cursor:
+            if method == "session/update":
+                return
+            if msg.get("id") is not None:
+                if method in {CURSOR_ASK, CURSOR_PLAN}:
+                    result = _ask_question_result() if method == CURSOR_ASK else CREATE_PLAN_OUTCOME
+                    await self._send_cursor({"jsonrpc": "2.0", "id": msg["id"], "result": result})
+                    return
+                if method in {CURSOR_TODOS, CURSOR_TASK, CURSOR_IMAGE}:
+                    await self._send_cursor(
+                        {"jsonrpc": "2.0", "id": msg["id"], "result": {"outcome": {"outcome": "accepted"}}}
+                    )
+                    return
+                if method == "session/request_permission":
+                    await self._send_cursor(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": msg["id"],
+                            "result": {"outcome": {"outcome": "cancelled"}},
+                        }
+                    )
+                    return
+                await self._send_cursor({"jsonrpc": "2.0", "id": msg["id"], "result": {}})
+            return
         if method in {CURSOR_ASK, CURSOR_PLAN} and msg.get("id") is not None:
             params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
             if method == CURSOR_ASK:
                 result = _ask_question_result(params)
-                text = _ask_question_text(params)
-                if text:
-                    sid = params.get("sessionId") if isinstance(params.get("sessionId"), str) else self._session_id
-                    if sid:
-                        await self._send_crew(
-                            {
-                                "jsonrpc": "2.0",
-                                "method": "session/update",
-                                "params": {
-                                    "sessionId": sid,
-                                    "update": {
-                                        "sessionUpdate": "agent_message_chunk",
-                                        "content": {"type": "text", "text": text + "\n"},
+                sid = params.get("sessionId") if isinstance(params.get("sessionId"), str) else self._session_id
+                if not self._turn_cancelled:
+                    card = cursor_ask_crew_messages(sid or "", params, call_id=f"cursor-ask-{msg['id']}")
+                    if card:
+                        for frame in card:
+                            await self._send_crew(frame)
+                    else:
+                        text = _ask_question_text(params)
+                        if text and sid:
+                            await self._send_crew(
+                                {
+                                    "jsonrpc": "2.0",
+                                    "method": "session/update",
+                                    "params": {
+                                        "sessionId": sid,
+                                        "update": {
+                                            "sessionUpdate": "agent_message_chunk",
+                                            "content": {"type": "text", "text": text + "\n"},
+                                        },
                                     },
-                                },
-                            }
-                        )
+                                }
+                            )
             else:
                 # cursor/create_plan is Cursor's plan UI. Crew's Autopilot
                 # parser only accepts 📋 / Stage N: / [OPTION: Go | Go All | Cancel]
                 # in assistant text. Mapping this RPC would race: Cursor treats
                 # accepted as "user approved, start work" while Crew still
                 # waits on Go. Keep accepted so the RPC does not hang; drop
-                # the body. PLANNING_STEER forbids the call.
-                result = {"outcome": {"outcome": "accepted"}}
+                # the body. Crew Autopilot never sees this RPC.
+                result = CREATE_PLAN_OUTCOME
             await self._send_cursor({"jsonrpc": "2.0", "id": msg["id"], "result": result})
             return
         if method in {CURSOR_TODOS, CURSOR_TASK}:
             params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
             sid = params.get("sessionId") if isinstance(params.get("sessionId"), str) else self._session_id
-            if method == CURSOR_TODOS and sid and not self._turn_cancelled:
-                for frame in cursor_todos_crew_messages(sid, params):
-                    await self._send_crew(frame)
+            if sid and not self._turn_cancelled:
+                if method == CURSOR_TODOS:
+                    for frame in cursor_todos_crew_messages(sid, params):
+                        await self._send_crew(frame)
+                else:
+                    for frame in cursor_task_crew_messages(sid, params):
+                        await self._send_crew(frame)
             if msg.get("id") is not None:
                 await self._send_cursor({"jsonrpc": "2.0", "id": msg["id"], "result": {"outcome": {"outcome": "accepted"}}})
             return
@@ -810,11 +1247,17 @@ class AcpBridge:
             await self._forward_generated_image(msg)
             return
         if method == "session/request_permission":
-            params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+            rewritten = _rewrite_permission_options(msg)
+            params = rewritten.get("params") if isinstance(rewritten.get("params"), dict) else {}
             options = params.get("options") if isinstance(params.get("options"), list) else []
-            result = _permission_allow(options)
-            _log(f"auto-allow permission {result}")
-            await self._send_cursor({"jsonrpc": "2.0", "id": msg["id"], "result": result})
+            req_id = rewritten.get("id")
+            if req_id is None:
+                _log("permission without id; drop (cannot reply)")
+                return
+            advertised = [item for item in options if isinstance(item, dict)]
+            self._pending_permissions[req_id] = advertised
+            _log(f"forward request_permission id={req_id} options={len(advertised)}")
+            await self._send_crew(rewritten)
             return
         if method == "session/update":
             _trace_cursor_update(msg)
@@ -835,7 +1278,9 @@ class AcpBridge:
             _log(f"auto-reply cursor request {method}")
             await self._send_cursor({"jsonrpc": "2.0", "id": msg["id"], "result": {}})
             return
-        await self._send_crew(_normalize_update(msg))
+        await self._send_crew(
+            _normalize_update(msg, crew_mode=self._crew_mode, agent=self.agent)
+        )
 
     def _auth_required(self, init_result: dict[str, Any]) -> bool:
         methods = init_result.get("authMethods") or init_result.get("authenticationMethods") or []
@@ -862,6 +1307,7 @@ class AcpBridge:
         method = msg.get("method")
         req_id = msg.get("id")
         params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+        _dump("crew_in", msg)
         if TRACE_DEFAULT:
             extra = ""
             if method == "session/prompt":
@@ -870,16 +1316,9 @@ class AcpBridge:
 
         if method == "initialize":
             crew_caps = params.get("clientCapabilities") if isinstance(params.get("clientCapabilities"), dict) else {}
-            fs = crew_caps.get("fs") if isinstance(crew_caps.get("fs"), dict) else {}
-            # Crew does not serve ACP fs/terminal. Advertising true makes Cursor
-            # call methods Crew answers with -32601. Pass the real caps through.
-            forwarded_caps: dict[str, Any] = {
-                "fs": {
-                    "readTextFile": bool(fs.get("readTextFile")),
-                    "writeTextFile": bool(fs.get("writeTextFile")),
-                },
-                "terminal": bool(crew_caps.get("terminal")),
-            }
+            # Honest fs/terminal (Crew has none) plus elicitation and any other
+            # keys Crew already sent — same clientCapabilities as native kiro-cli.
+            forwarded_caps = crew_client_capabilities(crew_caps)
             forwarded = {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -895,15 +1334,35 @@ class AcpBridge:
             return
 
         if method == "session/load":
-            # Cursor has no kiro {sid}.json. A successful fake load marks the
-            # Crew session RESUMED and skips conversation_log replay — Grok
-            # starts empty while the UI still shows the transcript. Fail like a
-            # missing native file so Crew does session/new + FirstTurnState.FRESH.
-            _log("session/load refused — Crew must session/new and replay history")
-            if req_id is not None:
-                await self._send_crew(
-                    {"jsonrpc": "2.0", "id": req_id, "error": session_load_error()}
-                )
+            # Fake-success load used to mark RESUMED and skip replay while Grok
+            # was empty. If Cursor advertised loadSession, forward for real so
+            # the child holds the thread (1:1 with kiro-cli session/load).
+            if not self._cursor_load_session:
+                _log("session/load refused — Cursor has no loadSession; Crew must session/new")
+                if req_id is not None:
+                    await self._send_crew(
+                        {"jsonrpc": "2.0", "id": req_id, "error": session_load_error()}
+                    )
+                return
+            cwd = prepare_cwd(str(params.get("cwd") or params.get("Cwd") or ""))
+            incoming = params.get("mcpServers") if isinstance(params.get("mcpServers"), list) else []
+            if skip_mcp() or is_lite_agent(self.agent):
+                unique: list[dict[str, Any]] = []
+            else:
+                unique = resolved_mcp_servers(self.agent, incoming)
+            sid = params.get("sessionId") if isinstance(params.get("sessionId"), str) else ""
+            load_params = {"sessionId": sid, "cwd": cwd, "mcpServers": unique}
+            self._cursor_new_params = {"cwd": cwd, "mcpServers": unique}
+            self._steered.clear()
+            self._crew_mode = ""
+            self._turn_cancelled = False
+            self._prompt_req_id = None
+            self._awaiting_replay = False
+            _log(f"session/load forwarded sid={sid!r} cwd={cwd} mcp={len(unique)}")
+            self._track_forward(req_id, "session/load")
+            await self._send_cursor(
+                {"jsonrpc": "2.0", "id": req_id, "method": "session/load", "params": load_params}
+            )
             return
 
         if method == "session/new":
@@ -915,7 +1374,7 @@ class AcpBridge:
             if skip_mcp() or is_lite_agent(self.agent):
                 unique: list[dict[str, Any]] = []
             else:
-                unique = merge_mcp_servers(incoming, mcp_servers_for_acp(self.agent))
+                unique = resolved_mcp_servers(self.agent, incoming)
             _log(
                 f"{method} cwd={cwd} mcp={len(unique)} skip={skip_mcp()} "
                 f"lite={is_lite_agent(self.agent)}"
@@ -925,30 +1384,45 @@ class AcpBridge:
             self._crew_mode = ""
             self._turn_cancelled = False
             self._prompt_req_id = None
+            self._awaiting_replay = True
+            self._retired_cursor_sids.clear()
             self._clear_cancel_watch()
             new_params = {"cwd": cwd, "mcpServers": unique}
+            self._cursor_new_params = new_params
             self._track_forward(req_id, "session/new")
             await self._send_cursor({"jsonrpc": "2.0", "id": req_id, "method": "session/new", "params": new_params})
             return
 
         if method == "session/prompt":
+            raw_text = prompt_text(params)
+            slash = slash_command_name(last_prompt_block(params)) or slash_command_name(raw_text)
+            if slash:
+                reply = local_slash_reply(slash, *self._usage.snapshot())
+                if reply:
+                    _log(f"session/prompt local /{slash}")
+                    await self._reply_local_text(req_id, params, reply)
+                    return
+            if is_compact_prompt(raw_text):
+                self._awaiting_replay = False
+                await self._compact_inplace(req_id, params)
+                return
+            first_turn = self._awaiting_replay
+            if self._awaiting_replay:
+                params = self._apply_recycle_replay(params)
+                self._awaiting_replay = False
             # set_mode is the agent name (kirocrew), never slot.mode=orchestrator.
-            self._crew_mode = remember_orchestrator(prompt_text(params), self._crew_mode)
+            self._crew_mode = remember_orchestrator(raw_text, self._crew_mode)
             extras = steering_texts(
                 params,
                 agent=self.agent,
                 crew_mode=self._crew_mode,
                 already=self._steered,
+                cwd=str(self._cursor_new_params.get("cwd") or ""),
+                first_turn=first_turn,
             )
             if extras:
-                if any("AUTOPILOT — native" in item for item in extras):
-                    self._steered.add("plan")
-                if any("stage execution" in item for item in extras):
-                    self._steered.add("stage")
-                if any("KIRO CREW BROWSER" in item for item in extras):
-                    self._steered.add("browser")
                 params = prepend_prompt_blocks(params, extras)
-                _log(f"session/prompt steered={sorted(self._steered)} extra_blocks={len(extras)}")
+                _log(f"session/prompt host_blocks={len(extras)}")
             chars = _prompt_chars(params)
             self._usage.note_prompt_chars(chars)
             prompt_sid = params.get("sessionId") if isinstance(params.get("sessionId"), str) else None
@@ -963,28 +1437,82 @@ class AcpBridge:
             return
 
         if method == "session/set_mode":
-            # Do not forward. Extra RPCs after session/new (set_mode + set_model)
-            # exited Cursor ACP with rc=1. Mode is already agent via CLI spawn.
+            # Do not forward to Cursor. Extra RPCs after session/new
+            # (set_mode + set_model) exited Cursor ACP with rc=1. Latch the
+            # Crew-facing id and emit current_mode_update so the mode bar
+            # matches; result.modes.currentModeId is the latch, not Cursor's
+            # spawn --mode.
             mode_id = str(params.get("modeId") or "")
+            if mode_id and not _mode_is_known(mode_id, self.agent):
+                _log(f"set_mode unknown {mode_id!r}")
+                if req_id is not None:
+                    await self._send_crew(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "error": {
+                                "code": -32602,
+                                "message": f"Mode {mode_id!r} is not available",
+                            },
+                        }
+                    )
+                return
             if mode_id.lower() in {"orchestrator", "autopilot"}:
                 self._crew_mode = "orchestrator"
             elif mode_id:
                 self._crew_mode = mode_id
             mapped = MODE_MAP.get(mode_id, MODE_MAP.get(self.agent, "agent"))
-            _log(f"local-ack set_mode {mode_id!r} -> {mapped} crew_mode={self._crew_mode!r}")
+            facing = self._crew_mode or self.agent
+            _log(f"set_mode latch {mode_id!r} -> cursor={mapped} crew_mode={facing!r}")
+            injected = _inject_modes({}, self.agent)
+            modes = dict(injected["modes"])
+            modes["currentModeId"] = facing
             if req_id is not None:
-                await self._send_crew({"jsonrpc": "2.0", "id": req_id, "result": {}})
+                await self._send_crew(
+                    {"jsonrpc": "2.0", "id": req_id, "result": {"modes": modes}}
+                )
+            sid = params.get("sessionId") if isinstance(params.get("sessionId"), str) else self._session_id
+            await self._emit_mode(sid)
             return
 
         if method == "session/set_model":
+            # Do not forward (same rc=1 as set_mode). Result.models.currentModelId
+            # is the child that is actually running — Crew's client still caches
+            # the requested id locally, but the advertised current id stays honest.
             wanted = params.get("modelId")
-            pinned = _rewrite_model(wanted)
-            _log(f"local-ack set_model {wanted!r} -> {pinned} (CLI --model already pinned)")
+            pinned = self._spawn_model()
+            rewritten = _rewrite_model(wanted, lite=is_lite_agent(self.agent))
+            _log(f"set_model {wanted!r} -> rewrite={rewritten} child={pinned} (not forwarded)")
+            if rewritten != pinned:
+                if req_id is not None:
+                    await self._send_crew(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": req_id,
+                            "error": {
+                                "code": -32602,
+                                "message": (
+                                    f"model {wanted!r} cannot run on this Cursor child "
+                                    f"(pinned {pinned})"
+                                ),
+                            },
+                        }
+                    )
+                return
+            models = {
+                "currentModelId": pinned,
+                "availableModels": [
+                    _model_entry(model_id, name) for model_id, name in advertised_model_aliases()
+                ],
+            }
             if req_id is not None:
-                await self._send_crew({"jsonrpc": "2.0", "id": req_id, "result": {}})
+                await self._send_crew(
+                    {"jsonrpc": "2.0", "id": req_id, "result": {"models": models}}
+                )
             return
 
         if method == "session/set_config_option":
+            _log(f"set_config_option no-op {params.get('configId')!r}")
             await self._send_crew({"jsonrpc": "2.0", "id": req_id, "result": {}})
             return
 
@@ -1000,15 +1528,46 @@ class AcpBridge:
             _log(f"local-ack {method}")
             result: dict[str, Any] = {}
             if method.endswith("compaction/status") or method.endswith("compaction_status"):
-                result = {"status": "idle"}
+                result = compaction_status_ack()
+            elif method.endswith("commands/options"):
+                result = command_options_result(params)
+            if method.endswith("commands/execute"):
+                if is_compact_command(params):
+                    if req_id is not None:
+                        await self._send_crew({"jsonrpc": "2.0", "id": req_id, "result": result})
+                    # Prompt /compact is the Crew path. Do not emit failed here —
+                    # that recycled a just-completed rotate+seed.
+                    return
+                name = execute_command_name(params)
+                reply = local_slash_reply(name, *self._usage.snapshot())
+                if reply:
+                    _log(f"local-ack {method} /{name}")
+                    if req_id is not None:
+                        await self._send_crew(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": req_id,
+                                "result": {"message": reply.strip()},
+                            }
+                        )
+                    return
             if req_id is not None:
                 await self._send_crew({"jsonrpc": "2.0", "id": req_id, "result": result})
             return
 
-        if req_id is not None and "result" in msg:
+        if req_id is not None and req_id in self._pending_permissions and (
+            "result" in msg or "error" in msg
+        ):
             advertised = self._pending_permissions.pop(req_id, None)
             patched = dict(msg)
-            patched["result"] = _map_permission_result(msg.get("result"), advertised)
+            if "result" in patched:
+                patched["result"] = _map_permission_result(msg.get("result"), advertised)
+            await self._send_cursor(patched)
+            return
+
+        if req_id is not None and "result" in msg:
+            patched = dict(msg)
+            patched["result"] = _map_permission_result(msg.get("result"), None)
             await self._send_cursor(patched)
             return
 
@@ -1023,10 +1582,27 @@ class AcpBridge:
             await self._send_crew(held)
 
     async def _handle_cursor_response(self, msg: dict[str, Any], crew_waiting_init: set[Any]) -> None:
+        _dump("cursor_in", msg)
+        waiter = self._cursor_waiters.get(msg.get("id"))
+        if waiter is not None:
+            if not waiter.done():
+                waiter.set_result(msg)
+            return
         tracked = ""
         if msg.get("id") is not None and ("result" in msg or "error" in msg):
             if msg.get("id") != self._auth_req_id:
                 tracked = self._pending_methods.pop(msg.get("id"), "")
+        if (
+            not tracked
+            and msg.get("id") != self._auth_req_id
+            and msg.get("id") not in crew_waiting_init
+            and isinstance(msg.get("result"), dict)
+        ):
+            late_sid = msg["result"].get("sessionId")
+            if isinstance(late_sid, str) and late_sid.strip():
+                self._cursor_sid = late_sid.strip()
+                _log(f"late cursor session/new sid={self._cursor_sid} (not forwarded to Crew)")
+                return
         if msg.get("id") == self._auth_req_id:
             if msg.get("error"):
                 _log(f"authenticate error: {msg['error']}")
@@ -1035,17 +1611,20 @@ class AcpBridge:
             return
         if msg.get("id") in crew_waiting_init and "result" in msg:
             result = msg.get("result") if isinstance(msg.get("result"), dict) else {}
+            cursor_caps = result.get("agentCapabilities") if isinstance(result.get("agentCapabilities"), dict) else {}
+            self._cursor_load_session = cursor_load_session_supported(cursor_caps)
             crew_result = {
                 "jsonrpc": "2.0",
                 "id": msg.get("id"),
                 "result": {
                     "protocolVersion": KIRO_PROTOCOL,
                     "agentCapabilities": {
-                        # Honest: no kiro {sid}.json. True + a successful fake
-                        # load marked RESUMED and skipped conversation_log replay.
-                        "loadSession": ADVERTISE_LOAD_SESSION,
-                        "promptCapabilities": {"image": True, "audio": False, "embeddedContext": False},
+                        # Cursor's real loadSession. False → Crew session/new + replay.
+                        # True → we forward session/load so Grok keeps the thread.
+                        "loadSession": self._cursor_load_session,
+                        "promptCapabilities": cursor_prompt_capabilities(cursor_caps),
                     },
+                    "agentInfo": {"name": KIRO_AGENT_NAME, "version": KIRO_AGENT_VERSION},
                     "serverInfo": {"name": "cursor-crew-bridge", "version": BRIDGE_VERSION},
                 },
             }
@@ -1063,11 +1642,12 @@ class AcpBridge:
             # Only rewrite session/new. set_mode/set_model results often contain
             # `modes`/`models`; treating those as session/new used to fire a
             # second overlapping set_model and kill Cursor ACP (rc=1).
-            if method == "session/new" and isinstance(result, dict):
+            if method in {"session/new", "session/load"} and isinstance(result, dict):
                 result = _inject_modes(dict(result), self.agent)
                 sid = result.get("sessionId")
                 if isinstance(sid, str) and sid.strip():
                     self._session_id = sid.strip()
+                    self._cursor_sid = sid.strip()
                 _log(
                     "session/new "
                     f"sid={result.get('sessionId')} "
@@ -1075,7 +1655,13 @@ class AcpBridge:
                     f"window={CONTEXT_WINDOW_TOKENS} "
                     f"mode={self.agent}"
                 )
+                if not self._crew_mode:
+                    self._crew_mode = self.agent
                 await self._send_crew({"jsonrpc": "2.0", "id": msg.get("id"), "result": result})
+                await self._emit_mcp_initialized(self._session_id)
+                await self._emit_commands(self._session_id)
+                await self._emit_mode(self._session_id)
+                await self._emit_usage(self._session_id)
                 return
             if method == "session/prompt":
                 req_id = msg.get("id")
@@ -1099,6 +1685,12 @@ class AcpBridge:
         if msg.get("id") is not None and "error" in msg:
             method = tracked
             method_hint = str((msg.get("error") or {}).get("message") or "")
+            if method == "session/load":
+                _log(f"session/load cursor error: {msg.get('error')}")
+                await self._send_crew(
+                    {"jsonrpc": "2.0", "id": msg.get("id"), "error": session_load_error()}
+                )
+                return
             if (
                 method in {"session/set_mode", "session/set_model", "session/set_config_option"}
                 or "not found" in method_hint.lower()
@@ -1108,6 +1700,28 @@ class AcpBridge:
                 await self._send_crew({"jsonrpc": "2.0", "id": msg.get("id"), "result": {}})
                 return
         await self._send_crew(msg)
+
+    async def _handle_crew_request_isolated(self, parsed: dict[str, Any]) -> None:
+        try:
+            await self._handle_crew_request(parsed)
+        except Exception:
+            _log("crew-message handler crashed:\n" + traceback.format_exc())
+            if parsed.get("id") is not None:
+                await self._send_crew(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": parsed.get("id"),
+                        "error": {"code": -32603, "message": "cursor-crew-bridge handler error"},
+                    }
+                )
+
+    async def _dispatch_crew_line(self, parsed: dict[str, Any], crew_waiting_init: set[Any]) -> None:
+        if parsed.get("method") == "initialize" and parsed.get("id") is not None:
+            crew_waiting_init.add(parsed.get("id"))
+        if _crew_rpc_awaits_cursor(parsed):
+            asyncio.create_task(self._handle_crew_request_isolated(parsed))
+            return
+        await self._handle_crew_request(parsed)
 
     async def run(self) -> int:
         await self.start()
@@ -1168,9 +1782,7 @@ class AcpBridge:
                 parsed = _parse_line(raw)
                 if parsed:
                     try:
-                        if parsed.get("method") == "initialize" and parsed.get("id") is not None:
-                            crew_waiting_init.add(parsed.get("id"))
-                        await self._handle_crew_request(parsed)
+                        await self._dispatch_crew_line(parsed, crew_waiting_init)
                     except Exception:
                         _log("crew-message handler crashed:\n" + traceback.format_exc())
                         if parsed.get("id") is not None:

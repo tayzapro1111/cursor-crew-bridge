@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from cursor_crew_bridge.config import DEFAULT_AGENT_NAME, agents_dir
+from cursor_crew_bridge.config import DEFAULT_AGENT_NAME, agents_dir, data_home
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -70,20 +70,79 @@ def to_cursor_mcp(entry: dict[str, Any], name: str) -> dict[str, Any] | None:
 CREW_IDENTITY_SERVERS = frozenset({"kirocrew-core", "kirocrew-dashboard"})
 
 
-def mcp_servers_for_acp(agent: str | None) -> list[dict[str, Any]]:
-    spec = load_agent_spec(agent)
-    raw = spec.get("mcpServers") or {}
+WRAPPER_MARKERS = ("_kirocrew_mcp_gateway_wrapped", "_mc_mcp_gateway_wrapped")
+
+
+def gateway_overlay_dir() -> Path:
+    return data_home() / "mcp-gateway" / "agents"
+
+
+def _servers_from_mapping(raw: Any, *, wrappers_only: bool = False) -> list[dict[str, Any]]:
     if not isinstance(raw, dict):
         return []
     servers: list[dict[str, Any]] = []
     for name, entry in raw.items():
         if not isinstance(entry, dict):
             continue
+        if wrappers_only and not any(entry.get(marker) for marker in WRAPPER_MARKERS):
+            continue
         converted = to_cursor_mcp(entry, str(name))
         if converted:
             servers.append(converted)
     return servers
 
+
+def overlay_mcp_servers(agent: str | None) -> list[dict[str, Any]]:
+    """Broker stubs Crew injects on session/new for claude; kiro-cli gets them via --agent overlay."""
+
+    name = (agent or DEFAULT_AGENT_NAME).strip() or DEFAULT_AGENT_NAME
+    overlay_dir = gateway_overlay_dir()
+    spec = _read_json(overlay_dir / f"{name}.json")
+    if not spec and overlay_dir.is_dir():
+        try:
+            candidates = sorted(overlay_dir.glob(f"*{name}.json"))
+        except OSError:
+            candidates = []
+        for path in candidates:
+            data = _read_json(path)
+            if data.get("name") == name:
+                spec = data
+                break
+    return _servers_from_mapping(spec.get("mcpServers"), wrappers_only=True)
+
+
+MCP_SERVER_INITIALIZED = "_kiro.dev/mcp/server_initialized"
+
+
+def mcp_initialized_notifications(
+    session_id: str,
+    servers: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """kiro-cli emits these after session/new; Cursor ACP does not."""
+
+    frames: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for server in servers or []:
+        name = str(server.get("name") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        params: dict[str, Any] = {"serverName": name}
+        if session_id:
+            params["sessionId"] = session_id
+        frames.append({"jsonrpc": "2.0", "method": MCP_SERVER_INITIALIZED, "params": params})
+    return frames
+
+def mcp_servers_for_acp(agent: str | None) -> list[dict[str, Any]]:
+    spec = load_agent_spec(agent)
+    return _servers_from_mapping(spec.get("mcpServers"))
+
+
+def resolved_mcp_servers(agent: str | None, incoming: list[Any] | None = None) -> list[dict[str, Any]]:
+    """session/new roster: Crew stubs, then gateway overlay, then agent spec. Native includeMcpJson is false."""
+
+    extra = merge_mcp_servers(overlay_mcp_servers(agent), mcp_servers_for_acp(agent))
+    return merge_mcp_servers(list(incoming or []), extra)
 
 def merge_mcp_servers(incoming: list[Any], extra: list[Any]) -> list[dict[str, Any]]:
     """Crew-injected stubs win on name so kirocrew-core keeps gateway identity."""

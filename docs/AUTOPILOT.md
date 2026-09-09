@@ -9,9 +9,11 @@ Crew still sends `session/set_mode` with the **agent name** (`kirocrew`), not `o
 This package therefore:
 
 1. Latches Autopilot when the prompt looks like a plan or a `_stage_loop` inject.
-2. Prepends a plan contract (`PLANNING_STEER`) or a stage contract (`STAGE_STEER`) on **every** matching turn, not only the first.
+2. On the **first** Cursor prompt, prepends native `prompt.md` or `prompt-orchestrator.md` (the same `_prompt_path` kiro-cli would load) plus `.kiro/steering/**/*.md` and a tiny Cursor-RPC delta. Crew already injects memory / skills / `[CURRENT AGENT]` — those are not duplicated.
 3. Accepts and **drops** Cursor’s `cursor/create_plan` (accepting it races Crew’s Go button).
 4. Maps `cursor/update_todos` into Crew’s todo sidebar.
+5. Maps `cursor/ask_question` to a Crew `AskUserQuestion` card (never auto-picks).
+6. Surfaces `cursor/task` as a thought (not a Kiro Crew subagent); generated images as an image block or a url/path link.
 
 You stay in the Crew Autopilot UI. Do not expect Cursor IDE’s own plan panel.
 
@@ -19,7 +21,7 @@ You stay in the Crew Autopilot UI. Do not expect Cursor IDE’s own plan panel.
 
 `KIROCREW_KIRO_BIN` points at `%LOCALAPPDATA%\Kiro-Cli\kiro-cli.exe` (or the macOS/Linux install). The shim is not in the path.
 
-Autopilot is whatever current Kiro Crew + `kiro-cli` already do: `prompt-orchestrator.md` on a new orchestrator session, native usage, native `session/load` if a `{sid}.json` exists. You need a Kiro subscription. This repo’s plan/stage steers are **not** injected.
+Autopilot is whatever current Kiro Crew + `kiro-cli` already do: `prompt-orchestrator.md` on a new orchestrator session, native usage, native `session/load` if a `{sid}.json` exists. You need a Kiro subscription. The Cursor path does not paraphrase that file.
 
 ## Switching
 

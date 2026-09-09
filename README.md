@@ -64,7 +64,7 @@ cursor-crew setup | doctor | gateway | default | status
 ## Package
 
 ```bash
-pip install https://github.com/Chumbayoumba/cursor-crew-bridge/releases/latest/download/cursor_crew_bridge-0.4.0-py3-none-any.whl
+pip install https://github.com/Chumbayoumba/cursor-crew-bridge/releases/latest/download/cursor_crew_bridge-0.8.0-py3-none-any.whl
 ```
 
 Or `pip install -e ".[dev]"` from a clone. Wheels ship on [GitHub Releases](https://github.com/Chumbayoumba/cursor-crew-bridge/releases).

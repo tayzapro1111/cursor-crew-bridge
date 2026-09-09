@@ -6,8 +6,10 @@ import os
 import tempfile
 from pathlib import Path
 
-BRIDGE_VERSION = "0.4.0"
-KIRO_VERSION_BANNER = "kiro-cli 2.15.0-cursor-crew-bridge"
+BRIDGE_VERSION = "0.8.0"
+KIRO_AGENT_NAME = "kiro-cli"
+KIRO_AGENT_VERSION = "2.15.0"
+KIRO_VERSION_BANNER = f"{KIRO_AGENT_NAME} {KIRO_AGENT_VERSION}-cursor-crew-bridge"
 
 # Cursor CLI accepts effort as a model suffix. Extra high is what this host
 # asked for; Fast is left off so billing stays on the standard Grok 4.6 pool.
@@ -61,6 +63,8 @@ DEFAULT_MODEL = _normalize_full_model(os.environ.get("CURSOR_CREW_MODEL", "curso
 LITE_MODEL = _normalize_lite_model(os.environ.get("CURSOR_CREW_LITE_MODEL", "cursor-grok-4.6-high-fast"))
 LITE_AGENTS = frozenset({"kirocrew-lite"})
 TRACE_DEFAULT = os.environ.get("CURSOR_CREW_TRACE", "1").strip().lower() not in {"0", "false", "no", "off"}
+_DUMP_OFF = {"", "0", "false", "no", "off"}
+_DUMP_ON = {"1", "true", "yes", "on"}
 DEFAULT_AGENT_NAME = "kirocrew"
 # Cursor Grok 4.6 Extra High window. Advertising 1M made Crew autocompact and
 # the meter run at the wrong scale, so the model hit 256k while the UI still
@@ -161,6 +165,18 @@ def log_paths() -> list[Path]:
     return found
 
 
+def dump_acp_path() -> Path | None:
+    """Optional redacted JSONL of Crew↔shim↔Cursor ACP. Off unless CURSOR_CREW_DUMP is set."""
+
+    raw = os.environ.get("CURSOR_CREW_DUMP", "").strip()
+    key = raw.lower()
+    if key in _DUMP_OFF:
+        return None
+    if key in _DUMP_ON:
+        return _try_prepare(data_home() / "logs" / "acp-dump.jsonl")
+    return Path(raw)
+
+
 def log_path() -> Path:
     paths = log_paths()
     if paths:
@@ -190,13 +206,22 @@ def catalog_models() -> list[dict[str, object]]:
     row shows a lock and cannot be selected.
     """
 
-    return [
+    rows = [
         {
             "model_id": DEFAULT_MODEL,
             "model_name": DEFAULT_MODEL,
             "context_window_tokens": CONTEXT_WINDOW_TOKENS,
         }
     ]
+    if LITE_MODEL and LITE_MODEL != DEFAULT_MODEL:
+        rows.append(
+            {
+                "model_id": LITE_MODEL,
+                "model_name": LITE_MODEL,
+                "context_window_tokens": CONTEXT_WINDOW_TOKENS,
+            }
+        )
+    return rows
 
 
 def advertised_model_aliases() -> list[tuple[str, str]]:
@@ -208,6 +233,8 @@ def advertised_model_aliases() -> list[tuple[str, str]]:
         ("auto", label),
         ("claude-opus-5", label),
     ]
+    if LITE_MODEL and LITE_MODEL != DEFAULT_MODEL:
+        aliases.append((LITE_MODEL, "Grok 4.6 High Fast"))
     seen = {item[0] for item in aliases}
     extra = []
     for row in catalog_models():
